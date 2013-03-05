@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <assert.h>
 
 #define BLOCK_SIZE  0x1E00
 #define BITRATE     128000
@@ -48,6 +49,60 @@ void swapBytes(uint8_t *data, size_t size) {
 	}
 }
 
+bool counterBitsMatch( uint8_t c, uint16_t d, size_t start, size_t end ) {
+	assert( start <= 8 );
+	assert( end   <= 8 );
+	assert( start < end );
+
+	for(size_t bitNum = start; bitNum < end; ++bitNum) {
+		bool cbit = (c & (1 << bitNum)) != 0;
+		bool dbit1 = (d & (1 << (bitNum * 2)));
+		bool dbit2 = (d & (1 << (bitNum * 2 + 1)));
+		if(cbit != dbit1 && cbit != dbit2) {
+			//printf("Counter bit doesnt match: %d (%04x) bit %d (%d %d %d)\n", c, d, bitNum, cbit, dbit1, dbit2);
+			return false;
+		}
+	}
+	return true;
+}
+
+bool counterWorks(uint8_t counter, uint16_t *data16, size_t offset) {
+	size_t i = offset/2; // index into data16
+	uint8_t c = counter + ((offset % 0x1E00) / 2); // adjust counter for offset
+
+	if((offset%2) == 0) {
+		return counterBitsMatch( c, data16[i] ^ 0xFFFB, 0, 8 );
+	} else {
+		return counterBitsMatch( c, data16[i] ^ 0x00FF, 4, 8 ) && counterBitsMatch( c, data16[i+1] ^ 0xFB00, 0, 4 );;
+	}
+}
+
+uint8_t determineCounter(uint8_t *data, size_t size) {
+	uint8_t result = 0;
+	for(uint16_t counter = 0; counter <= 255; ++counter) {
+		size_t i = 0;
+		bool works = true;
+		while(i < LOOP_OFFSET && i < size) {
+			i = findNextFrameHeader(data, size, i);
+			if(!counterWorks(counter, data, i)) {
+				if(i > 12) {
+					printf("%d abandonded at %d\n", counter, i);
+				}
+				works = false;
+				break;
+			}
+			i += FRAME_SIZE;
+		}
+
+		if(works) {
+			printf("Found possible counter: %u\n", counter);
+			result = counter;
+		}
+	}
+
+	return result;
+}
+
 int main(int argc, char *argv[]) {
 	if(argc < 2) { 
 		fprintf(stderr, "Usage: %s <file>\n", argv[0]);
@@ -75,11 +130,17 @@ int main(int argc, char *argv[]) {
 	printf("Swapping bytes\n");
 	swapBytes(data, size);
 
+
+	void *scramblePattern = calloc(1, BLOCK_SIZE);
+	void *key = calloc(1, BLOCK_SIZE);
+
+
+	uint8_t counter = determineCounter(data, size);
+
 	// Find all frame headers in block
 	// Use headers to determine counter
 	// Use counter to determine scramble pattern
 	// Use headers to determine key
-
 
 	size_t firstFrameHeader = findNextFrameHeader(data, size, 0);
 	size_t secondFrameHeader = findNextFrameHeader(data, size, firstFrameHeader+FRAME_SIZE);
