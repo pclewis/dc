@@ -15,6 +15,7 @@ void die(char *fmt, ...) {
 	va_start(args, fmt);
 	vfprintf(stderr, fmt, args);
 	va_end(args);
+	fprintf(stderr, "\n");
 
 	exit(EXIT_FAILURE);
 }
@@ -39,6 +40,14 @@ size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start) {
 	return i;
 }
 
+void swapBytes(uint8_t *data, size_t size) {
+	for(size_t i = 0; i < size-2; i += 2) {
+		uint8_t tmp = data[i];
+		data[i] = data[i+1];
+		data[i+1] = tmp;
+	}
+}
+
 int main(int argc, char *argv[]) {
 	if(argc < 2) { 
 		fprintf(stderr, "Usage: %s <file>\n", argv[0]);
@@ -51,10 +60,25 @@ int main(int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	}
 
+	fseek(fp, 0, SEEK_END);
 	size_t size = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+
 	void *data = malloc( size );
-	fread(data, size, 1, fp);
+
+	size_t readBytes = fread(data, 1, size, fp);
+	if(readBytes < size) {
+		die("Read %zu of %zu bytes", readBytes, size);
+	}
 	fclose(fp);
+
+	printf("Swapping bytes\n");
+	swapBytes(data, size);
+
+	// Find all frame headers in block
+	// Use headers to determine counter
+	// Use counter to determine scramble pattern
+	// Use headers to determine key
 
 
 	size_t firstFrameHeader = findNextFrameHeader(data, size, 0);
