@@ -10,6 +10,9 @@
 #define FREQUENCY   44100
 #define FRAME_SIZE  144 * BITRATE / FREQUENCY
 #define LOOP_OFFSET 0xF000 // I don't actually understand this value
+#define BIT(i)      (1<<(i))
+#define BIT_IS_SET(v,i) ((v&BIT(i))!=0)
+
 
 void die(char *fmt, ...) {
 	va_list args;
@@ -49,45 +52,44 @@ void swapBytes(uint8_t *data, size_t size) {
 	}
 }
 
-bool counterBitsMatch( uint8_t c, uint16_t d, size_t start, size_t end ) {
+bool counterBitsMatch( uint8_t c, uint16_t d, uint16_t x, size_t start, size_t end ) {
 	assert( start <= 8 );
 	assert( end   <= 8 );
 	assert( start < end );
 
 	for(size_t bitNum = start; bitNum < end; ++bitNum) {
-		bool cbit = (c & (1 << bitNum)) != 0;
-		bool dbit1 = (d & (1 << (bitNum * 2)));
-		bool dbit2 = (d & (1 << (bitNum * 2 + 1)));
-		if(cbit != dbit1 && cbit != dbit2) {
-			//printf("Counter bit doesnt match: %d (%04x) bit %d (%d %d %d)\n", c, d, bitNum, cbit, dbit1, dbit2);
+		bool cbit = BIT_IS_SET(c, bitNum);
+		if(cbit != (BIT_IS_SET(d, bitNum * 2 + 0) ^ BIT_IS_SET(x, bitNum * 2 + 1)) &&
+		   cbit != (BIT_IS_SET(d, bitNum * 2 + 1) ^ BIT_IS_SET(x, bitNum * 2 + 1))) {
+			//printf("Counter bit doesnt match: %d (%04x) (%04x) bit %d %d\n", c, d, x, bitNum, BIT_IS_SET(c, bitNum));
 			return false;
 		}
 	}
 	return true;
 }
 
-bool counterWorks(uint8_t counter, uint16_t *data16, size_t offset) {
-	size_t i = offset/2; // index into data16
-	uint8_t c = counter + ((offset % 0x1E00) / 2); // adjust counter for offset
+bool counterWorks(uint8_t counter, uint8_t *data, size_t offset) {
+	uint8_t c = counter + (offset/2);
 
 	if((offset%2) == 0) {
-		return counterBitsMatch( c, data16[i] ^ 0xFFFB, 0, 8 );
+		uint16_t d = data[offset] << 8 | data[offset+1];;
+		return counterBitsMatch( c, d, 0xFFFB, 0, 8 );
 	} else {
-		return counterBitsMatch( c, data16[i] ^ 0x00FF, 4, 8 ) && counterBitsMatch( c, data16[i+1] ^ 0xFB00, 0, 4 );;
+		//printf("Straddle %u %u\n", data[offset], data[offset+1]);
+		return counterBitsMatch( c, data[offset], 0x00FF, 0, 4) && counterBitsMatch( c+1, data[offset+1] << 8, 0xFB00, 4, 8);
 	}
 }
 
 uint8_t determineCounter(uint8_t *data, size_t size) {
 	uint8_t result = 0;
+	unsigned int found_count = 0;
 	for(uint16_t counter = 0; counter <= 255; ++counter) {
 		size_t i = 0;
 		bool works = true;
 		while(i < LOOP_OFFSET && i < size) {
 			i = findNextFrameHeader(data, size, i);
 			if(!counterWorks(counter, data, i)) {
-				if(i > 12) {
-					printf("%d abandonded at %d\n", counter, i);
-				}
+				//printf("%d abandonded at %d\n", counter, i);
 				works = false;
 				break;
 			}
@@ -97,9 +99,15 @@ uint8_t determineCounter(uint8_t *data, size_t size) {
 		if(works) {
 			printf("Found possible counter: %u\n", counter);
 			result = counter;
+			found_count += 1;
 		}
 	}
 
+	if(found_count > 1) {
+		printf("Warning: multiple counters found, using %u.\n", result);
+	} else if (found_count == 0) {
+		die("Could not determine counter");
+	}
 	return result;
 }
 
