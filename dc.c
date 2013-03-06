@@ -6,6 +6,7 @@
 #include <assert.h>
 
 #define BLOCK_SIZE  0x1E00
+#define KEY_REPEAT  240
 #define BITRATE     128000
 #define FREQUENCY   44100
 #define FRAME_SIZE  144 * BITRATE / FREQUENCY
@@ -111,6 +112,70 @@ uint8_t determineCounter(uint8_t *data, size_t size) {
 	return result;
 }
 
+void counterBitsMagic( uint8_t c, uint16_t d, uint16_t x, size_t start, size_t end, uint8_t *key, uint8_t *keyKnown, uint8_t *scramblePattern, uint8_t *scrambleKnown ) {
+	assert( start <= 8 );
+	assert( end   <= 8 );
+	assert( start < end );
+
+	for(size_t bitNum = start; bitNum < end; ++bitNum) {
+		bool cbit = BIT_IS_SET(c, bitNum);
+		bool dbit0 = (BIT_IS_SET(d, bitNum * 2 + 0) ^ BIT_IS_SET(x, bitNum * 2 + 1));
+		bool dbit1 = (BIT_IS_SET(d, bitNum * 2 + 1) ^ BIT_IS_SET(x, bitNum * 2 + 1));
+
+		if(cbit == dbit0 && cbit != dbit1) {
+		   	*scrambleKnown |= BIT(bitNum);
+			*scramblePattern |= BIT(bitNum);
+			*keyKnown |= BIT(bitNum);
+			if(BIT_IS_SET(d, bitNum * 2 + 1) ^ BIT_IS_SET(x, bitNum * 2)) *key |= BIT(bitNum);
+		} else if (cbit == dbit1 && cbit != dbit0) {
+			*scrambleKnown |= BIT(bitNum);
+			*keyKnown |= BIT(bitNum);
+			if(BIT_IS_SET(d, bitNum * 2) ^ BIT_IS_SET(x, bitNum * 2)) *key |= BIT(bitNum);
+		}
+	}
+}
+
+
+void fillInKey( uint8_t *data, size_t offset, uint8_t counter, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
+	uint8_t c = counter + (offset / 2);
+	size_t offs = offset % KEY_REPEAT;
+
+	if((offset%2) == 0) {
+		uint16_t d = data[offset] << 8 | data[offset+1];
+		counterBitsMagic( c, d, 0xFFFB, 0, 8, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
+	} else {
+		counterBitsMagic( c+0, data[offset+0] << 0, 0x00FF, 0, 4, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
+		offs = (offset + 1) % KEY_REPEAT;
+		counterBitsMagic( c+1, data[offset+1] << 8, 0xFB00, 4, 8, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
+	}
+}
+
+void determineKey( uint8_t *data, size_t size, uint8_t counter, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
+	size_t i = 0;
+	for(i = findNextFrameHeader(data, size, 0); i < LOOP_OFFSET && i < size; i = findNextFrameHeader(data, size, i + FRAME_SIZE)) {
+		fillInKey( data, i, counter, scramblePattern, scrambleKnown, key, keyKnown );
+	}
+}
+
+unsigned int knownBits(uint8_t *bits) {
+	unsigned int count = 0;
+	for (size_t i = 0; i < KEY_REPEAT; ++i) {
+		for(size_t b = 0; b < 8; ++b) {
+			if(BIT_IS_SET(bits[i], b)) ++count;
+		}
+	}
+	return count;
+}
+
+void printKnownBits(uint8_t *bits, uint8_t *known) {
+	for (size_t i = 0; i < 16; ++i) {
+		for(int b = 7; b >= 0; --b) {
+			if(BIT_IS_SET(known[i], b)) printf("%d", BIT_IS_SET(bits[i], b)); else printf(" ");
+		}
+	}
+	printf("\n");
+}
+
 int main(int argc, char *argv[]) {
 	if(argc < 2) { 
 		fprintf(stderr, "Usage: %s <file>\n", argv[0]);
@@ -139,22 +204,21 @@ int main(int argc, char *argv[]) {
 	swapBytes(data, size);
 
 
-	void *scramblePattern = calloc(1, BLOCK_SIZE);
-	void *key = calloc(1, BLOCK_SIZE);
+	void *scramblePattern = calloc(1, KEY_REPEAT);
+	void *scrambleKnown   = calloc(1, KEY_REPEAT);
+	void *key             = calloc(1, KEY_REPEAT);
+	void *keyKnown        = calloc(1, KEY_REPEAT);
 
 
 	uint8_t counter = determineCounter(data, size);
 
-	// Find all frame headers in block
-	// Use headers to determine counter
-	// Use counter to determine scramble pattern
-	// Use headers to determine key
+	determineKey( data, size, counter, scramblePattern, scrambleKnown, key, keyKnown );
 
-	size_t firstFrameHeader = findNextFrameHeader(data, size, 0);
-	size_t secondFrameHeader = findNextFrameHeader(data, size, firstFrameHeader+FRAME_SIZE);
+	printf("Known scramble bits: %d/%d\n", knownBits(scrambleKnown), KEY_REPEAT*8 );
+	printf("Known key bits: %d/%d\n", knownBits(keyKnown), KEY_REPEAT*8 );
 
-	printf("Found first frame at %zu\n", firstFrameHeader);
-	printf("Found second frame at %zu\n", secondFrameHeader);
+	printKnownBits( scramblePattern, scrambleKnown );
+	printKnownBits( key, keyKnown );
 
 	return EXIT_SUCCESS;
 }
