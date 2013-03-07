@@ -47,7 +47,7 @@ size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start) {
 		}
 	}
 
-	if( ((i - start) % FRAME_SIZE) > 1 ) printf("Suspicious frame offset: %u -> %u\n", start, i);
+	if( ((i - start) % FRAME_SIZE) > 1 ) printf("Suspicious frame offset: %zu -> %zu\n", start, i);
 	//printf("Found frame header at %u\n", i);
 	return i;
 }
@@ -181,7 +181,7 @@ void fillInKey( uint8_t *data, size_t offset, uint8_t counter, uint8_t *scramble
 	if((offset%2) == 0) {
 		uint16_t d = data[offset] << 8 | data[offset+1];
 		if(offs == 2 || offs == 5) {
-			printf("%u: %u (%u)\n", offs, c, offset);
+			printf("%zu: %u (%zu)\n", offs, c, offset);
 		}
 		counterBitsMagic2( c, d, 0xFFFB, 0xFFFF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
 		offs = (offs + 1) % KEY_REPEAT;
