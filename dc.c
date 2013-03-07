@@ -18,7 +18,7 @@
 #define FH_B34_MASK ((FH_B3_MASK << 8) | FH_B4_MASK)
 
 #define MAX_KEY_REPEAT 480
-static const size_t KEY_REPEATS[] = { 30, 60, 80, 120, 240, 480, 0 };
+static const size_t KEY_REPEATS[] = { 30, 40, 48, 60, 80, 120, 240, 0 };
 
 void die(char *fmt, ...) {
 	va_list args;
@@ -37,7 +37,7 @@ size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start) {
 		if( data[i] == data[LOOP_OFFSET+i] && data[i+1] == data[LOOP_OFFSET+i+1]) {
 			uint8_t b1 = data[i], b2 = data[i+1], b3 = data[i+2] & FH_B3_MASK, b4 = data[i+3] & FH_B4_MASK;
 			bool found = true;
-			for(size_t j = i; j < size; j += LOOP_OFFSET) {
+			for(size_t j = i; j < (size-4); j += LOOP_OFFSET) {
 				if(data[j] != b1 || data[j+1] != b2 || (data[j+2] & FH_B3_MASK) != b3 || (data[j+3] & FH_B4_MASK) != b4) {
 					//if (i == 0) printf("No frame at 0 (%u): (%02x, %02x, %02x, %02x) (%02x, %02x, %02x, %02x)\n", j, data[j], data[j+1], data[j+2] & FH_B3_MASK, data[j+3] & FH_B4_MASK, b1, b2, b3, b4);
 					found = false;
@@ -162,39 +162,39 @@ bool counterBitsMagic2( uint8_t counter, uint16_t cipherBytes, uint16_t plainByt
 
 		if(counterBit == xbit0) {
 			if( BIT_IS_SET(*scrambleKnown, bitNum) && !BIT_IS_SET(*scramblePattern, bitNum) ) {
-				printf("scramble pattern collision a @ bit %zu\n", bitNum);
+				printf("scramble collision a @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
 				return false;
 			}
 		   	*scrambleKnown   |= BIT(bitNum);
 			*scramblePattern |= BIT(bitNum);
 			if(BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit) {
 				if(BIT_IS_SET(*keyKnown, bitNum) && !BIT_IS_SET(*key, bitNum)) {
-					printf("key collision a @ bit %zu\n", bitNum);
+					printf("key collision a @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
 					return false;
 				}
 				*key |= BIT(bitNum);
 			} else {
 				if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)) {
-					printf("key collision b @ bit %zu\n", bitNum);
+					printf("key collision b @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
 					return false;
 				}
 			}
 			*keyKnown |= BIT(bitNum);
 		} else {
 			if( BIT_IS_SET(*scrambleKnown, bitNum) && BIT_IS_SET(*scramblePattern, bitNum) ) {
-				printf("scramble pattern collision b @ bit %zu\n", bitNum);
+				printf("scramble collision b @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
 				return false;
 			}
 			*scrambleKnown |= BIT(bitNum);
 			if(BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit) {
 				if(BIT_IS_SET(*keyKnown, bitNum) && !BIT_IS_SET(*key, bitNum)) {
-					printf("key collision c @ bit %zu\n", bitNum);
+					printf("key collision c @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
 					return false;
 				}
  				*key |= BIT(bitNum);
  			} else {
 				if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)) {
-					printf("key collision d @ bit %zu\n", bitNum);
+					printf("key collision d @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
 					return false;
 				}
  			}
