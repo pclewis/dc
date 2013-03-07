@@ -6,7 +6,7 @@
 #include <assert.h>
 
 #define BLOCK_SIZE  0x1E00
-#define KEY_REPEAT  240 // 0x1E00 //240
+#define KEY_REPEAT  30 //240 // 0x1E00 //240
 #define BITRATE     128000
 #define FREQUENCY   44100
 #define FRAME_SIZE  (144 * BITRATE / FREQUENCY)
@@ -231,22 +231,21 @@ static inline uint8_t reverseBits(uint8_t b) {// hax
 void *decryptData( uint8_t *data, size_t size, uint8_t counter, uint8_t *scramblePattern, uint8_t *key ) {
 	uint8_t *result = malloc( size );
 	for(size_t i = 0; i < size; i += 2) {
-		uint8_t ic = reverseBits(counter);
 		uint16_t iv = data[i] << 8 | data[i+1];
 		uint16_t ov = 0;
 
 		for(size_t b = 0; b < 8; ++b) {
 			bool b1 = BIT_IS_SET( iv, b*2 ), b2 = BIT_IS_SET( iv, b*2+1 );
-			if(BIT_IS_SET(scramblePattern[i % KEY_REPEAT], b)) {
+			if(BIT_IS_SET(scramblePattern[(i/2) % KEY_REPEAT], b)) {
 				bool t = b1; b1 = b2; b2 = t;
 			}
 
-			if( b1 ^ BIT_IS_SET(ic, b) ^ BIT_IS_SET(key[i % KEY_REPEAT], b)) ov |= BIT(b*2);
+			if( b1 ^ BIT_IS_SET(counter, 7-b) ^ BIT_IS_SET(key[(i/2) % KEY_REPEAT], b)) ov |= BIT(b*2);
 			if( b2 ^ BIT_IS_SET(counter, b) ) ov |= BIT(b*2+1);
 		}
 
-		result[i] = ov & 0xFF;
-		result[i+1] = ov >> 8 & 0xFF;
+		result[i+1] = ov & 0xFF;
+		result[i] = ov >> 8 & 0xFF;
 		counter += 1;
 	}
 
