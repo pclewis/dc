@@ -6,7 +6,6 @@
 #include <assert.h>
 
 #define BLOCK_SIZE  0x1E00
-#define KEY_REPEAT  30 //240 // 0x1E00 //240
 #define BITRATE     128000
 #define FREQUENCY   44100
 #define FRAME_SIZE  (144 * BITRATE / FREQUENCY)
@@ -18,6 +17,8 @@
 #define FH_B4_MASK  0x0F // some frame use joint stereo (bits 4,5,6,7), so ignore first 4 bits
 #define FH_B34_MASK ((FH_B3_MASK << 8) | FH_B4_MASK)
 
+#define MAX_KEY_REPEAT 480
+static const size_t KEY_REPEATS[] = { 30, 60, 80, 120, 240, 480, 0 };
 
 void die(char *fmt, ...) {
 	va_list args;
@@ -147,7 +148,7 @@ void counterBitsMagic( uint8_t counter, uint16_t cipherBytes, uint16_t plainByte
 	}
 }
 
-void counterBitsMagic2( uint8_t counter, uint16_t cipherBytes, uint16_t plainBytes, uint16_t mask, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
+bool counterBitsMagic2( uint8_t counter, uint16_t cipherBytes, uint16_t plainBytes, uint16_t mask, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
 	for(size_t bitNum = 0; bitNum < 8; ++bitNum) {
 		if(!BIT_IS_SET(mask, bitNum * 2) || !BIT_IS_SET(mask, bitNum * 2 + 1)) continue;
 		bool counterBit   = BIT_IS_SET(counter, bitNum);
@@ -160,53 +161,85 @@ void counterBitsMagic2( uint8_t counter, uint16_t cipherBytes, uint16_t plainByt
 		if(xbit0 == xbit1) continue; // if the bits are the same we don't know which corresponds to the counter
 
 		if(counterBit == xbit0) {
+			if( BIT_IS_SET(*scrambleKnown, bitNum) && !BIT_IS_SET(*scramblePattern, bitNum) ) {
+				printf("scramble pattern collision a @ bit %zu\n", bitNum);
+				return false;
+			}
 		   	*scrambleKnown   |= BIT(bitNum);
 			*scramblePattern |= BIT(bitNum);
-			*keyKnown        |= BIT(bitNum);
-			if(BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit) *key |= BIT(bitNum);
-		} else {
-			*scrambleKnown |= BIT(bitNum);
+			if(BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit) {
+				if(BIT_IS_SET(*keyKnown, bitNum) && !BIT_IS_SET(*key, bitNum)) {
+					printf("key collision a @ bit %zu\n", bitNum);
+					return false;
+				}
+				*key |= BIT(bitNum);
+			} else {
+				if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)) {
+					printf("key collision b @ bit %zu\n", bitNum);
+					return false;
+				}
+			}
 			*keyKnown |= BIT(bitNum);
-			if(BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit) *key |= BIT(bitNum);
+		} else {
+			if( BIT_IS_SET(*scrambleKnown, bitNum) && BIT_IS_SET(*scramblePattern, bitNum) ) {
+				printf("scramble pattern collision b @ bit %zu\n", bitNum);
+				return false;
+			}
+			*scrambleKnown |= BIT(bitNum);
+			if(BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit) {
+				if(BIT_IS_SET(*keyKnown, bitNum) && !BIT_IS_SET(*key, bitNum)) {
+					printf("key collision c @ bit %zu\n", bitNum);
+					return false;
+				}
+ 				*key |= BIT(bitNum);
+ 			} else {
+				if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)) {
+					printf("key collision d @ bit %zu\n", bitNum);
+					return false;
+				}
+ 			}
+			*keyKnown |= BIT(bitNum);
 		}
-
 	}
+	return true;
 }
 
 
-void fillInKey( uint8_t *data, size_t offset, uint8_t counter, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
+bool fillInKey( uint8_t *data, size_t offset, uint8_t counter, size_t key_repeat, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
 	uint8_t c = counter + (offset / 2);
-	size_t offs = (offset / 2) % KEY_REPEAT;
+	size_t offs = (offset / 2) % key_repeat;
 
 	if((offset%2) == 0) {
 		uint16_t d = data[offset] << 8 | data[offset+1];
-		if(offs == 2 || offs == 5) {
+		/*if(offs == 2 || offs == 5) {
 			printf("%zu: %u (%zu)\n", offs, c, offset);
-		}
-		counterBitsMagic2( c, d, 0xFFFB, 0xFFFF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
-		offs = (offs + 1) % KEY_REPEAT;
+		}*/
+		if (!counterBitsMagic2( c, d, 0xFFFB, 0xFFFF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
+		offs = (offs + 1) % key_repeat;
 		c += 1;
 		d = data[offset+2] << 8 | data[offset+3];
-		counterBitsMagic2( c, d, 0x9000, FH_B34_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
+		if (!counterBitsMagic2( c, d, 0x9000, FH_B34_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
 	} else {
-		counterBitsMagic2( c+0, data[offset+0] << 0, 0x00FF, 0x00FF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
-		offs = (offs + 1) % KEY_REPEAT;
-		counterBitsMagic2( c+1, data[offset+1] << 8 | data[offset+2], 0xFB90, 0xFF00 | FH_B3_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
-		offs = (offs + 1) % KEY_REPEAT;
-		counterBitsMagic2( c+2, data[offset+3] << 8, 0x0000, FH_B4_MASK << 8, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
+		if (!counterBitsMagic2( c+0, data[offset+0] << 0, 0x00FF, 0x00FF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
+		offs = (offs + 1) % key_repeat;
+		if (!counterBitsMagic2( c+1, data[offset+1] << 8 | data[offset+2], 0xFB90, 0xFF00 | FH_B3_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
+		offs = (offs + 1) % key_repeat;
+		if (!counterBitsMagic2( c+2, data[offset+3] << 8, 0x0000, FH_B4_MASK << 8, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
 	}
+	return true;
 }
 
-void determineKey( uint8_t *data, size_t size, uint8_t counter, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
+bool determineKey( uint8_t *data, size_t size, uint8_t counter, size_t key_repeat, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
 	size_t i = 0;
 	for(i = findNextFrameHeader(data, size, 0); i < LOOP_OFFSET && i < size; i = findNextFrameHeader(data, size, i + FRAME_SIZE)) {
-		fillInKey( data, i, counter, scramblePattern, scrambleKnown, key, keyKnown );
+		if (!fillInKey( data, i, counter, key_repeat, scramblePattern, scrambleKnown, key, keyKnown )) return false;
 	}
+	return true;
 }
 
 unsigned int knownBits(uint8_t *bits) {
 	unsigned int count = 0;
-	for (size_t i = 0; i < KEY_REPEAT; ++i) {
+	for (size_t i = 0; i < MAX_KEY_REPEAT; ++i) {
 		for(size_t b = 0; b < 8; ++b) {
 			if(BIT_IS_SET(bits[i], b)) ++count;
 		}
@@ -228,7 +261,7 @@ static inline uint8_t reverseBits(uint8_t b) {// hax
 }
 
 /* note: data should already be byte swapped */
-void *decryptData( uint8_t *data, size_t size, uint8_t counter, uint8_t *scramblePattern, uint8_t *key ) {
+void *decryptData( uint8_t *data, size_t size, uint8_t counter, size_t key_repeat, uint8_t *scramblePattern, uint8_t *key ) {
 	uint8_t *result = malloc( size );
 	for(size_t i = 0; i < size; i += 2) {
 		uint16_t iv = data[i] << 8 | data[i+1];
@@ -236,11 +269,11 @@ void *decryptData( uint8_t *data, size_t size, uint8_t counter, uint8_t *scrambl
 
 		for(size_t b = 0; b < 8; ++b) {
 			bool b1 = BIT_IS_SET( iv, b*2 ), b2 = BIT_IS_SET( iv, b*2+1 );
-			if(BIT_IS_SET(scramblePattern[(i/2) % KEY_REPEAT], b)) {
+			if(BIT_IS_SET(scramblePattern[(i/2) % key_repeat], b)) {
 				bool t = b1; b1 = b2; b2 = t;
 			}
 
-			if( b1 ^ BIT_IS_SET(counter, 7-b) ^ BIT_IS_SET(key[(i/2) % KEY_REPEAT], b)) ov |= BIT(b*2);
+			if( b1 ^ BIT_IS_SET(counter, 7-b) ^ BIT_IS_SET(key[(i/2) % key_repeat], b)) ov |= BIT(b*2);
 			if( b2 ^ BIT_IS_SET(counter, b) ) ov |= BIT(b*2+1);
 		}
 
@@ -280,24 +313,37 @@ int main(int argc, char *argv[]) {
 	swapBytes(data, size);
 
 
-	void *scramblePattern = calloc(1, KEY_REPEAT);
-	void *scrambleKnown   = calloc(1, KEY_REPEAT);
-	void *key             = calloc(1, KEY_REPEAT);
-	void *keyKnown        = calloc(1, KEY_REPEAT);
+	void *scramblePattern = calloc(1, MAX_KEY_REPEAT);
+	void *scrambleKnown   = calloc(1, MAX_KEY_REPEAT);
+	void *key             = calloc(1, MAX_KEY_REPEAT);
+	void *keyKnown        = calloc(1, MAX_KEY_REPEAT);
 
 
 	uint8_t counter = determineCounter(data, size);
+	size_t key_repeat = 0;
 
-	determineKey( data, size, counter, scramblePattern, scrambleKnown, key, keyKnown );
+	for(size_t kri = 0; (key_repeat = KEY_REPEATS[kri]) != 0; ++kri) {
+		printf("Trying key size %zu\n", key_repeat);
+		bzero(scramblePattern, MAX_KEY_REPEAT); bzero(scrambleKnown, MAX_KEY_REPEAT);
+		bzero(key, MAX_KEY_REPEAT); bzero(keyKnown, MAX_KEY_REPEAT);
+		if(determineKey( data, size, counter, key_repeat, scramblePattern, scrambleKnown, key, keyKnown ))
+			break;
+	}
 
-	printf("Known scramble bits: %d/%d\n", knownBits(scrambleKnown), KEY_REPEAT*8 );
-	printf("Known key bits: %d/%d\n", knownBits(keyKnown), KEY_REPEAT*8 );
+	if(key_repeat == 0) {
+		printf("Couldn't find key size\n");
+		return EXIT_FAILURE;
+	}
+
+	printf("Known scramble bits: %d/%zu\n", knownBits(scrambleKnown), key_repeat*8 );
+	printf("Known key bits: %d/%zu\n", knownBits(keyKnown), key_repeat*8 );
+
 
 	printKnownBits( scramblePattern, scrambleKnown );
 	printKnownBits( key, keyKnown );
 
 	if(argc==3) {
-		void * out = decryptData(data, size, counter, scramblePattern, key);
+		void * out = decryptData(data, size, counter, key_repeat, scramblePattern, key);
 		FILE * ofp = fopen(argv[2], "wb");
 		fwrite(out, size, 1, ofp);
 		fclose(ofp);
