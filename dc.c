@@ -125,6 +125,7 @@ void counterBitsMagic( uint8_t counter, uint16_t cipherBytes, uint16_t plainByte
 
 	for(size_t bitNum = start; bitNum < end; ++bitNum) {
 		bool counterBit   = BIT_IS_SET(counter, bitNum);
+		bool oppositeCounterBit = BIT_IS_SET(counter, 7 - bitNum);
 		bool ptKeyBit     = BIT_IS_SET(plainBytes, bitNum * 2);
 		bool ptCounterBit = BIT_IS_SET(plainBytes, bitNum * 2 + 1);
 		bool xbit0        = BIT_IS_SET(cipherBytes, bitNum * 2 + 0) ^ ptCounterBit;
@@ -136,11 +137,11 @@ void counterBitsMagic( uint8_t counter, uint16_t cipherBytes, uint16_t plainByte
 		   	*scrambleKnown   |= BIT(bitNum);
 			*scramblePattern |= BIT(bitNum);
 			*keyKnown        |= BIT(bitNum);
-			if(BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit) *key |= BIT(bitNum);
+			if(BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit) *key |= BIT(bitNum);
 		} else {
 			*scrambleKnown |= BIT(bitNum);
 			*keyKnown |= BIT(bitNum);
-			if(BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit) *key |= BIT(bitNum);
+			if(BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit) *key |= BIT(bitNum);
 		}
 	}
 }
@@ -152,14 +153,14 @@ void fillInKey( uint8_t *data, size_t offset, uint8_t counter, uint8_t *scramble
 
 	if((offset%2) == 0) {
 		uint16_t d = data[offset] << 8 | data[offset+1];
-		if(offs == 2 || offs == 4) {
+		if(offs == 2 || offs == 5) {
 			printf("%u: %u (%u)\n", offs, c, offset);
 		}
 		counterBitsMagic( c, d, 0xFFFB, 0, 8, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
 	} else {
-		//counterBitsMagic( c+0, data[offset+0] << 0, 0x00FF, 0, 4, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
-		//offs = (offset + 1) % KEY_REPEAT;
-		//counterBitsMagic( c+1, data[offset+1] << 8, 0xFB00, 4, 8, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
+		counterBitsMagic( c+0, data[offset+0] << 0, 0x00FF, 0, 4, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
+		offs = (offs + 1) % KEY_REPEAT;
+		counterBitsMagic( c+1, data[offset+1] << 8, 0xFB00, 4, 8, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
 	}
 }
 
