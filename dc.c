@@ -16,6 +16,7 @@
 
 #define FH_B3_MASK  0xFC // frames may or may not have the padding bit (bit 2) set, and it may or may not be scrambled, so ignore last two bits
 #define FH_B4_MASK  0x0F // some frame use joint stereo (bits 4,5,6,7), so ignore first 4 bits
+#define FH_B34_MASK ((FH_B3_MASK << 8) | FH_B4_MASK)
 
 
 void die(char *fmt, ...) {
@@ -146,6 +147,32 @@ void counterBitsMagic( uint8_t counter, uint16_t cipherBytes, uint16_t plainByte
 	}
 }
 
+void counterBitsMagic2( uint8_t counter, uint16_t cipherBytes, uint16_t plainBytes, uint16_t mask, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
+	for(size_t bitNum = 0; bitNum < 8; ++bitNum) {
+		if(!BIT_IS_SET(mask, bitNum * 2) || !BIT_IS_SET(mask, bitNum * 2 + 1)) continue;
+		bool counterBit   = BIT_IS_SET(counter, bitNum);
+		bool oppositeCounterBit = BIT_IS_SET(counter, 7 - bitNum);
+		bool ptKeyBit     = BIT_IS_SET(plainBytes, bitNum * 2);
+		bool ptCounterBit = BIT_IS_SET(plainBytes, bitNum * 2 + 1);
+		bool xbit0        = BIT_IS_SET(cipherBytes, bitNum * 2 + 0) ^ ptCounterBit;
+		bool xbit1        = BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptCounterBit;
+
+		if(xbit0 == xbit1) continue; // if the bits are the same we don't know which corresponds to the counter
+
+		if(counterBit == xbit0) {
+		   	*scrambleKnown   |= BIT(bitNum);
+			*scramblePattern |= BIT(bitNum);
+			*keyKnown        |= BIT(bitNum);
+			if(BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit) *key |= BIT(bitNum);
+		} else {
+			*scrambleKnown |= BIT(bitNum);
+			*keyKnown |= BIT(bitNum);
+			if(BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit) *key |= BIT(bitNum);
+		}
+
+	}
+}
+
 
 void fillInKey( uint8_t *data, size_t offset, uint8_t counter, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
 	uint8_t c = counter + (offset / 2);
@@ -156,11 +183,17 @@ void fillInKey( uint8_t *data, size_t offset, uint8_t counter, uint8_t *scramble
 		if(offs == 2 || offs == 5) {
 			printf("%u: %u (%u)\n", offs, c, offset);
 		}
-		counterBitsMagic( c, d, 0xFFFB, 0, 8, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
-	} else {
-		counterBitsMagic( c+0, data[offset+0] << 0, 0x00FF, 0, 4, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
+		counterBitsMagic2( c, d, 0xFFFB, 0xFFFF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
 		offs = (offs + 1) % KEY_REPEAT;
-		counterBitsMagic( c+1, data[offset+1] << 8, 0xFB00, 4, 8, key + offs, keyKnown + offs, scramblePattern + offs, scrambleKnown + offs);
+		c += 1;
+		d = data[offset+2] << 8 | data[offset+3];
+		counterBitsMagic2( c, d, 0x9000, FH_B34_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
+	} else {
+		counterBitsMagic2( c+0, data[offset+0] << 0, 0x00FF, 0x00FF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
+		offs = (offs + 1) % KEY_REPEAT;
+		counterBitsMagic2( c+1, data[offset+1] << 8 | data[offset+2], 0xFB90, 0xFF00 | FH_B3_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
+		offs = (offs + 1) % KEY_REPEAT;
+		counterBitsMagic2( c+2, data[offset+3] << 8, 0x00, FH_B4_MASK << 8, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
 	}
 }
 
