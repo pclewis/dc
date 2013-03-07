@@ -47,7 +47,7 @@ size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start) {
 		}
 	}
 
-	if( ((i - start) % FRAME_SIZE) > 1 ) printf("Suspicious frame offset: %zu -> %zu\n", start, i);
+	if( (start != 0) && ((i - start) % FRAME_SIZE) > 1 ) printf("Suspicious frame offset: %zu -> %zu\n", start, i);
 	//printf("Found frame header at %u\n", i);
 	return i;
 }
@@ -193,7 +193,7 @@ void fillInKey( uint8_t *data, size_t offset, uint8_t counter, uint8_t *scramble
 		offs = (offs + 1) % KEY_REPEAT;
 		counterBitsMagic2( c+1, data[offset+1] << 8 | data[offset+2], 0xFB90, 0xFF00 | FH_B3_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
 		offs = (offs + 1) % KEY_REPEAT;
-		counterBitsMagic2( c+2, data[offset+3] << 8, 0x00, FH_B4_MASK << 8, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
+		counterBitsMagic2( c+2, data[offset+3] << 8, 0x0000, FH_B4_MASK << 8, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs);
 	}
 }
 
@@ -223,9 +223,39 @@ void printKnownBits(uint8_t *bits, uint8_t *known) {
 	printf("\n");
 }
 
+static inline uint8_t reverseBits(uint8_t b) {// hax
+	return ((b * 0x0802LU & 0x22110LU) | (b * 0x8020LU & 0x88440LU)) * 0x10101LU >> 16; 
+}
+
+/* note: data should already be byte swapped */
+void *decryptData( uint8_t *data, size_t size, uint8_t counter, uint8_t *scramblePattern, uint8_t *key ) {
+	uint8_t *result = malloc( size );
+	for(size_t i = 0; i < size; i += 2) {
+		uint8_t ic = reverseBits(counter);
+		uint16_t iv = data[i] << 8 | data[i+1];
+		uint16_t ov = 0;
+
+		for(size_t b = 0; b < 8; ++b) {
+			bool b1 = BIT_IS_SET( iv, b*2 ), b2 = BIT_IS_SET( iv, b*2+1 );
+			if(BIT_IS_SET(scramblePattern[i % KEY_REPEAT], b)) {
+				bool t = b1; b1 = b2; b2 = t;
+			}
+
+			if( b1 ^ BIT_IS_SET(ic, b) ^ BIT_IS_SET(key[i % KEY_REPEAT], b)) ov |= BIT(b*2);
+			if( b2 ^ BIT_IS_SET(counter, b) ) ov |= BIT(b*2+1);
+		}
+
+		result[i] = ov & 0xFF;
+		result[i+1] = ov >> 8 & 0xFF;
+		counter += 1;
+	}
+
+	return result;
+}
+
 int main(int argc, char *argv[]) {
-	if(argc < 2) { 
-		fprintf(stderr, "Usage: %s <file>\n", argv[0]);
+	if(argc<2 || argc>3) { 
+		fprintf(stderr, "Usage: %s <file> [output]\n", argv[0]);
 		return EXIT_FAILURE;
 	}
 
@@ -266,6 +296,14 @@ int main(int argc, char *argv[]) {
 
 	printKnownBits( scramblePattern, scrambleKnown );
 	printKnownBits( key, keyKnown );
+
+	if(argc==3) {
+		void * out = decryptData(data, size, counter, scramblePattern, key);
+		FILE * ofp = fopen(argv[2], "wb");
+		fwrite(out, size, 1, ofp);
+		fclose(ofp);
+		printf("Wrote %zu bytes to %s\n", size, argv[2]);
+	}
 
 	return EXIT_SUCCESS;
 }
