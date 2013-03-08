@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <assert.h>
+#include <string.h>
 
 #define BLOCK_SIZE  0x1E00
 #define BITRATE     128000
@@ -17,8 +18,15 @@
 #define FH_B4_MASK  0x0F // some frame use joint stereo (bits 4,5,6,7), so ignore first 4 bits
 #define FH_B34_MASK ((FH_B3_MASK << 8) | FH_B4_MASK)
 
-#define MAX_KEY_REPEAT 480
+#define MAX_KEY_REPEAT 240
 static const size_t KEY_REPEATS[] = { 30, 40, 48, 60, 80, 120, 240, 0 };
+
+typedef struct {
+	uint8_t counter;
+	size_t keySize;
+	uint8_t key[MAX_KEY_REPEAT];
+	uint8_t scramble[MAX_KEY_REPEAT];
+} DCState;
 
 void die(char *fmt, ...) {
 	va_list args;
@@ -120,37 +128,21 @@ uint8_t determineCounter(uint8_t *data, size_t size) {
 	return result;
 }
 
-void counterBitsMagic( uint8_t counter, uint16_t cipherBytes, uint16_t plainBytes, size_t start, size_t end, uint8_t *key, uint8_t *keyKnown, uint8_t *scramblePattern, uint8_t *scrambleKnown ) {
-	assert( start <= 8 );
-	assert( end   <= 8 );
-	assert( start < end );
+bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask, DCState *state, DCState *known ) {
+	uint16_t cipherBytes     = (data[offset] << 8) | data[offset+1];
+	uint8_t  counter         = state->counter + (offset / 2);
+	size_t   keyOffset       = (offset / 2) % state->keySize;
+	uint8_t *scrambleKnown   = known->scramble + keyOffset;
+	uint8_t *keyKnown        = known->key      + keyOffset;
+	uint8_t *key             = state->key      + keyOffset;
+	uint8_t *scramblePattern = state->scramble + keyOffset;
 
-	for(size_t bitNum = start; bitNum < end; ++bitNum) {
-		bool counterBit   = BIT_IS_SET(counter, bitNum);
-		bool oppositeCounterBit = BIT_IS_SET(counter, 7 - bitNum);
-		bool ptKeyBit     = BIT_IS_SET(plainBytes, bitNum * 2);
-		bool ptCounterBit = BIT_IS_SET(plainBytes, bitNum * 2 + 1);
-		bool xbit0        = BIT_IS_SET(cipherBytes, bitNum * 2 + 0) ^ ptCounterBit;
-		bool xbit1        = BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptCounterBit;
+#define COLLISION(type, n) { printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); return false; }
+	assert( (offset % 2) == 0 );
 
-		if(xbit0 == xbit1) continue; // if the bits are the same we don't know which corresponds to the counter
-
-		if(counterBit == xbit0) {
-		   	*scrambleKnown   |= BIT(bitNum);
-			*scramblePattern |= BIT(bitNum);
-			*keyKnown        |= BIT(bitNum);
-			if(BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit) *key |= BIT(bitNum);
-		} else {
-			*scrambleKnown |= BIT(bitNum);
-			*keyKnown |= BIT(bitNum);
-			if(BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit) *key |= BIT(bitNum);
-		}
-	}
-}
-
-bool counterBitsMagic2( uint8_t counter, uint16_t cipherBytes, uint16_t plainBytes, uint16_t mask, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
 	for(size_t bitNum = 0; bitNum < 8; ++bitNum) {
 		if(!BIT_IS_SET(mask, bitNum * 2) || !BIT_IS_SET(mask, bitNum * 2 + 1)) continue;
+
 		bool counterBit   = BIT_IS_SET(counter, bitNum);
 		bool oppositeCounterBit = BIT_IS_SET(counter, 7 - bitNum);
 		bool ptKeyBit     = BIT_IS_SET(plainBytes, bitNum * 2);
@@ -161,78 +153,37 @@ bool counterBitsMagic2( uint8_t counter, uint16_t cipherBytes, uint16_t plainByt
 		if(xbit0 == xbit1) continue; // if the bits are the same we don't know which corresponds to the counter
 
 		if(counterBit == xbit0) {
-			if( BIT_IS_SET(*scrambleKnown, bitNum) && !BIT_IS_SET(*scramblePattern, bitNum) ) {
-				printf("scramble collision a @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
-				return false;
-			}
+			if( BIT_IS_SET(*scrambleKnown, bitNum) && !BIT_IS_SET(*scramblePattern, bitNum) ) COLLISION( "scramble", "A" );
 		   	*scrambleKnown   |= BIT(bitNum);
 			*scramblePattern |= BIT(bitNum);
-			if(BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit) {
-				if(BIT_IS_SET(*keyKnown, bitNum) && !BIT_IS_SET(*key, bitNum)) {
-					printf("key collision a @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
-					return false;
-				}
-				*key |= BIT(bitNum);
-			} else {
-				if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)) {
-					printf("key collision b @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
-					return false;
-				}
-			}
+			bool bit = BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit;
+			if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)!=bit) COLLISION("key", "A");
+			if(bit) *key |= BIT(bitNum);
 			*keyKnown |= BIT(bitNum);
 		} else {
-			if( BIT_IS_SET(*scrambleKnown, bitNum) && BIT_IS_SET(*scramblePattern, bitNum) ) {
-				printf("scramble collision b @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
-				return false;
-			}
+			if( BIT_IS_SET(*scrambleKnown, bitNum) && BIT_IS_SET(*scramblePattern, bitNum) ) COLLISION("scramble", "B");
 			*scrambleKnown |= BIT(bitNum);
-			if(BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit) {
-				if(BIT_IS_SET(*keyKnown, bitNum) && !BIT_IS_SET(*key, bitNum)) {
-					printf("key collision c @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
-					return false;
-				}
- 				*key |= BIT(bitNum);
- 			} else {
-				if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)) {
-					printf("key collision d @ bit %zu (counter=%u cb=%u pb=%u m=%u)\n", bitNum, counter, cipherBytes, plainBytes, mask);
-					return false;
-				}
- 			}
+
+			bool bit = BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit;
+			if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)!=bit) COLLISION("key", "B");
+			if(bit) *key |= BIT(bitNum);
 			*keyKnown |= BIT(bitNum);
 		}
 	}
 	return true;
 }
 
-
-bool fillInKey( uint8_t *data, size_t offset, uint8_t counter, size_t key_repeat, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
-	uint8_t c = counter + (offset / 2);
-	size_t offs = (offset / 2) % key_repeat;
-
-	if((offset%2) == 0) {
-		uint16_t d = data[offset] << 8 | data[offset+1];
-		/*if(offs == 2 || offs == 5) {
-			printf("%zu: %u (%zu)\n", offs, c, offset);
-		}*/
-		if (!counterBitsMagic2( c, d, 0xFFFB, 0xFFFF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
-		offs = (offs + 1) % key_repeat;
-		c += 1;
-		d = data[offset+2] << 8 | data[offset+3];
-		if (!counterBitsMagic2( c, d, 0x9000, FH_B34_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
-	} else {
-		if (!counterBitsMagic2( c+0, data[offset+0] << 0, 0x00FF, 0x00FF, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
-		offs = (offs + 1) % key_repeat;
-		if (!counterBitsMagic2( c+1, data[offset+1] << 8 | data[offset+2], 0xFB90, 0xFF00 | FH_B3_MASK, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
-		offs = (offs + 1) % key_repeat;
-		if (!counterBitsMagic2( c+2, data[offset+3] << 8, 0x0000, FH_B4_MASK << 8, scramblePattern + offs, scrambleKnown + offs, key + offs, keyKnown + offs)) return false;
-	}
-	return true;
-}
-
-bool determineKey( uint8_t *data, size_t size, uint8_t counter, size_t key_repeat, uint8_t *scramblePattern, uint8_t *scrambleKnown, uint8_t *key, uint8_t *keyKnown ) {
+bool determineKey( uint8_t *data, size_t size, DCState *state, DCState *known ) {
 	size_t i = 0;
-	for(i = findNextFrameHeader(data, size, 0); i < LOOP_OFFSET && i < size; i = findNextFrameHeader(data, size, i + FRAME_SIZE)) {
-		if (!fillInKey( data, i, counter, key_repeat, scramblePattern, scrambleKnown, key, keyKnown )) return false;
+	for(i = findNextFrameHeader(data, size, 0); i < (LOOP_OFFSET-4) && i < (size-4); i = findNextFrameHeader(data, size, i + FRAME_SIZE)) {
+		if((i%2) == 0) {
+			if (!deriveKey( data, i+0, 0xFFFB, 0xFFFF,              state, known)) return false;
+			if (!deriveKey( data, i+2, 0x9000, FH_B34_MASK,         state, known)) return false;
+		} else {
+			if (!deriveKey( data, i-1, 0x00FF, 0x00FF,              state, known)) return false;
+			if (!deriveKey( data, i+1, 0xFB90, 0xFF00 | FH_B3_MASK, state, known)) return false;
+			if (!deriveKey( data, i+3, 0x0000, FH_B4_MASK << 8,     state, known)) return false;
+		}
 	}
 	return true;
 }
@@ -261,19 +212,20 @@ static inline uint8_t reverseBits(uint8_t b) {// hax
 }
 
 /* note: data should already be byte swapped */
-void *decryptData( uint8_t *data, size_t size, uint8_t counter, size_t key_repeat, uint8_t *scramblePattern, uint8_t *key ) {
+void *decryptData( uint8_t *data, size_t size, DCState *state ) { 
 	uint8_t *result = malloc( size );
+	uint8_t counter = state->counter;
 	for(size_t i = 0; i < size; i += 2) {
 		uint16_t iv = data[i] << 8 | data[i+1];
 		uint16_t ov = 0;
 
 		for(size_t b = 0; b < 8; ++b) {
 			bool b1 = BIT_IS_SET( iv, b*2 ), b2 = BIT_IS_SET( iv, b*2+1 );
-			if(BIT_IS_SET(scramblePattern[(i/2) % key_repeat], b)) {
+			if(BIT_IS_SET(state->scramble[(i/2) % state->keySize], b)) {
 				bool t = b1; b1 = b2; b2 = t;
 			}
 
-			if( b1 ^ BIT_IS_SET(counter, 7-b) ^ BIT_IS_SET(key[(i/2) % key_repeat], b)) ov |= BIT(b*2);
+			if( b1 ^ BIT_IS_SET(counter, 7-b) ^ BIT_IS_SET(state->key[(i/2) % state->keySize], b)) ov |= BIT(b*2);
 			if( b2 ^ BIT_IS_SET(counter, b) ) ov |= BIT(b*2+1);
 		}
 
@@ -286,15 +238,16 @@ void *decryptData( uint8_t *data, size_t size, uint8_t counter, size_t key_repea
 }
 
 int main(int argc, char *argv[]) {
+	int status = EXIT_FAILURE;
 	if(argc<2 || argc>3) { 
 		fprintf(stderr, "Usage: %s <file> [output]\n", argv[0]);
-		return EXIT_FAILURE;
+		goto done;
 	}
 
 	FILE *fp = fopen(argv[1], "rb");
 	if(fp == NULL) {
 		perror("Couldn't open file");
-		return EXIT_FAILURE;
+		goto done;
 	}
 
 	fseek(fp, 0, SEEK_END);
@@ -313,44 +266,48 @@ int main(int argc, char *argv[]) {
 	swapBytes(data, size);
 
 
-	void *scramblePattern = calloc(1, MAX_KEY_REPEAT);
-	void *scrambleKnown   = calloc(1, MAX_KEY_REPEAT);
-	void *key             = calloc(1, MAX_KEY_REPEAT);
-	void *keyKnown        = calloc(1, MAX_KEY_REPEAT);
-
+	DCState *state = malloc(sizeof(DCState));
+	DCState *known = malloc(sizeof(DCState));
 
 	uint8_t counter = determineCounter(data, size);
-	size_t key_repeat = 0;
+	size_t keySize = 0;
 
-	for(size_t kri = 0; (key_repeat = KEY_REPEATS[kri]) != 0; ++kri) {
-		printf("Trying key size %zu\n", key_repeat);
-		bzero(scramblePattern, MAX_KEY_REPEAT); bzero(scrambleKnown, MAX_KEY_REPEAT);
-		bzero(key, MAX_KEY_REPEAT); bzero(keyKnown, MAX_KEY_REPEAT);
-		if(determineKey( data, size, counter, key_repeat, scramblePattern, scrambleKnown, key, keyKnown ))
+	for(size_t kri = 0; (keySize = KEY_REPEATS[kri]) != 0; ++kri) {
+		printf("Trying key size %zu\n", keySize);
+		memset( state, 0, sizeof(DCState) );
+		memset( known, 0, sizeof(DCState) );
+		state->counter = known->counter = counter;
+		state->keySize = known->keySize = keySize;
+		if(determineKey( data, size, state, known ))
 			break;
 	}
 
-	if(key_repeat == 0) {
+	if(keySize == 0) {
 		printf("Couldn't find key size\n");
-		return EXIT_FAILURE;
+		goto done;
 	}
 
-	printf("Known scramble bits: %d/%zu\n", knownBits(scrambleKnown), key_repeat*8 );
-	printf("Known key bits: %d/%zu\n", knownBits(keyKnown), key_repeat*8 );
+	printf("Known scramble bits: %d/%zu\n", knownBits(known->scramble), known->keySize*8 );
+	printf("Known key bits: %d/%zu\n", knownBits(known->key), known->keySize*8 );
 
-
-	printKnownBits( scramblePattern, scrambleKnown );
-	printKnownBits( key, keyKnown );
+	printKnownBits( state->scramble, known->scramble );
+	printKnownBits( state->key, known->key );
 
 	if(argc==3) {
-		void * out = decryptData(data, size, counter, key_repeat, scramblePattern, key);
+		void * out = decryptData(data, size, state); 
 		FILE * ofp = fopen(argv[2], "wb");
 		fwrite(out, size, 1, ofp);
 		fclose(ofp);
 		printf("Wrote %zu bytes to %s\n", size, argv[2]);
 	}
 
-	return EXIT_SUCCESS;
+	status = EXIT_SUCCESS;
+
+done:
+	free(data);
+	free(state);
+	free(known);
+	return status;
 }
 
 
