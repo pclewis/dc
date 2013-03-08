@@ -440,7 +440,7 @@ int main(int argc, char *argv[]) {
 								int count = 0;
 								memcpy( orig_state, state, sizeof(DCState) );
 								memcpy( orig_known, known, sizeof(DCState) );
-								for(size_t i = si; i < fi + FRAME_SIZE - 1; i += 2) {
+								for(size_t i = si; i < fi + FRAME_SIZE - 1 && i < size - 1; i += 2) {
 									if( deriveKey( data, i, r, 0xFFFF, state, known ) ) {
 										count++;
 									} else {
@@ -467,6 +467,9 @@ int main(int argc, char *argv[]) {
 				}
 			}
 		}
+
+		free(orig_state);
+		free(orig_known);
 
 		printf("Found %d runs\n", ff);
 	}
