@@ -243,9 +243,37 @@ void *decryptData( uint8_t *data, size_t size, DCState *state ) {
 	return result;
 }
 
+void *encryptData( uint8_t *data, size_t size, DCState *state ) { 
+	uint8_t *result = malloc( size );
+	uint8_t counter = state->counter; 
+	printf("Counter %u\n", counter);
+	for(size_t i = 0; i < size; i += 2) {
+		uint16_t iv = data[i] << 8 | data[i+1];
+		uint16_t ov = 0;
+
+		for(size_t b = 0; b < 8; ++b) {
+			bool b1 = BIT_IS_SET( iv, b*2 ), b2 = BIT_IS_SET( iv, b*2+1 );
+			bool ob1 = b1 ^ BIT_IS_SET(counter, 7-b) ^ BIT_IS_SET(state->key[(i/2) % state->keySize], b);
+			bool ob2 = b2 ^ BIT_IS_SET(counter, b);
+			if(BIT_IS_SET(state->scramble[(i/2) % state->keySize], b)) {
+				bool t = ob1; ob1 = ob2; ob2 = t;
+			}
+			if(ob1) ov |= BIT(b*2);
+			if(ob2) ov |= BIT(b*2+1);
+		}
+
+		// swap
+		result[i] = ov & 0xFF;
+		result[i+1] = ov >> 8 & 0xFF;
+		counter += 1;
+	}
+
+	return result;
+}
+
 
 void usage(char *pname) {
-	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-o instate] [-O outstate] [-p plaintext] <infile> [outfile]\n", pname);
+	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-o instate] [-O outstate] [-p plaintext] [-e] <infile> [outfile]\n", pname);
 	printf("\n");
 }
 
@@ -283,12 +311,13 @@ int main(int argc, char *argv[]) {
 	uint8_t counter   = 0;
 	bool counterSet   = false;
 	void *data        = NULL;
+	bool encrypt      = false;
 
 	DCState *state = calloc(1, sizeof(DCState));
 	DCState *known = calloc(1, sizeof(DCState));
 
 	int c;
-	while((c = getopt(argc, argv, "hk:K:s:S:c:o:O:p:")) != -1) {
+	while((c = getopt(argc, argv, "hk:K:s:S:c:o:O:p:e")) != -1) {
 		switch(c) {
 			case 'k': inKey       = confirmOpen(optarg, "rb"); break;
 			case 'K': outKey      = confirmOpen(optarg, "wb"); break;
@@ -297,6 +326,7 @@ int main(int argc, char *argv[]) {
 			case 'o': inState     = confirmOpen(optarg, "rb"); break;
 			case 'O': outState    = confirmOpen(optarg, "wb"); break;
 			case 'p': plainText   = confirmOpen(optarg, "rb"); break;
+			case 'e': encrypt = true; break;
 			case 'c': 
 				counter = atoi(optarg);
 				counterSet = true;
@@ -325,14 +355,24 @@ int main(int argc, char *argv[]) {
 	fclose(inFile);
 	inFile = NULL;
 
-	printf("Swapping bytes\n");
-	swapBytes(data, size);
+	if(!encrypt) {
+		printf("Swapping bytes\n");
+		swapBytes(data, size);
+	}
+
+	if (encrypt && !inState && (!inKey || !inScramble || !counterSet)) {
+		printf("can't encrypt without state\n");
+		goto done;
+	}
 
 	if(inState) {
 		fread(state, 1, sizeof(DCState), inState);
 		fclose(inState); inState = NULL;
+		known->keySize = state->keySize;
 		memset(&known->key, 0xFF, state->keySize);
 		memset(&known->scramble, 0xFF, state->keySize);
+		counter = state->counter;
+		counterSet = true;
 	}
 
 	if(inKey) {
@@ -484,9 +524,10 @@ int main(int argc, char *argv[]) {
 	if(outScramble != NULL) writeFile( "scramble", outScramble, &state->scramble, state->keySize  );
 	if(outState    != NULL) writeFile( "state",    outState,    state,           sizeof(DCState) );
 
+
 	if(outFile!=NULL) {
-		void * out = decryptData(data, size, state); 
-		writeFile("decrypted data", outFile, out, size);
+		void * out = encrypt ? encryptData(data, size, state) : decryptData(data, size, state); 
+		writeFile(encrypt ? "encrypted data" : "decrypted data", outFile, out, size);
 		free(out);
 	}
 
