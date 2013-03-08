@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <string.h>
+#include <getopt.h>
 
 #define BLOCK_SIZE  0x1E00
 #define BITRATE     128000
@@ -244,54 +245,131 @@ void *decryptData( uint8_t *data, size_t size, DCState *state ) {
 	return result;
 }
 
-int main(int argc, char *argv[]) {
-	int status = EXIT_FAILURE;
-	if(argc<2 || argc>3) { 
-		fprintf(stderr, "Usage: %s <file> [output]\n", argv[0]);
-		goto done;
-	}
 
-	FILE *fp = fopen(argv[1], "rb");
-	if(fp == NULL) {
-		perror("Couldn't open file");
-		goto done;
-	}
+void usage(char *pname) {
+	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-O outstate] <infile> [outfile]\n", pname);
+	printf("\n");
+}
 
+FILE *confirmOpen(const char *fn, const char *mode) {
+	FILE *fp = fopen(fn, mode);
+	if(!fp) perror(fn);
+	return fp;
+}
+
+void writeFile(const char *desc, FILE *fp, void *data, size_t size) {
+	size_t wroteBytes = fwrite(data, 1, size, fp);
+	printf("Wrote %s: %zu/%zu bytes\n", desc, wroteBytes, size);
+}
+
+long fileSize(FILE *fp) {
+	long start = ftell(fp);
 	fseek(fp, 0, SEEK_END);
-	size_t size = ftell(fp);
-	fseek(fp, 0, SEEK_SET);
+	long result = ftell(fp);
+	fseek(fp, start, SEEK_SET);
+	return result;
+}
 
-	void *data = malloc( size );
+int main(int argc, char *argv[]) {
+	int status        = EXIT_FAILURE;
 
-	size_t readBytes = fread(data, 1, size, fp);
-	if(readBytes < size) {
-		die("Read %zu of %zu bytes", readBytes, size);
+	FILE *inKey       = NULL;
+	FILE *outKey      = NULL;
+	FILE *inScramble  = NULL;
+	FILE *outScramble = NULL;
+	FILE *outState    = NULL;
+	FILE *inFile      = NULL;
+	FILE *outFile     = NULL;
+	uint8_t counter   = 0;
+	bool counterSet   = false;
+	void *data        = NULL;
+
+	DCState *state = calloc(1, sizeof(DCState));
+	DCState *known = calloc(1, sizeof(DCState));
+
+	int c;
+	while((c = getopt(argc, argv, "hk:K:s:S:c:O:")) != -1) {
+		switch(c) {
+			case 'k': inKey       = confirmOpen(optarg, "rb"); break;
+			case 'K': outKey      = confirmOpen(optarg, "wb"); break;
+			case 's': inScramble  = confirmOpen(optarg, "rb"); break;
+			case 'S': outScramble = confirmOpen(optarg, "wb"); break;
+			case 'O': outState    = confirmOpen(optarg, "wb"); break;
+			case 'c': 
+				counter = atoi(optarg);
+				counterSet = true;
+				break;
+			case 'h':
+			case '?':
+				usage(argv[0]);
+				goto done;
+		}
 	}
-	fclose(fp);
+	if(optind < argc) inFile  = confirmOpen(argv[optind++], "rb");
+	if(optind < argc) outFile = confirmOpen(argv[optind++], "wb");
+	if(optind < argc || inFile == NULL) {
+		usage(argv[0]);
+		goto done;
+	}
+
+	fseek(inFile, 0, SEEK_END);
+	size_t size = ftell(inFile);
+	fseek(inFile, 0, SEEK_SET);
+
+	data = malloc( size );
+
+	size_t readBytes = fread(data, 1, size, inFile);
+	if(readBytes < size) die("Read %zu of %zu bytes", readBytes, size);
+	fclose(inFile);
+	inFile = NULL;
 
 	printf("Swapping bytes\n");
 	swapBytes(data, size);
 
-
-	DCState *state = malloc(sizeof(DCState));
-	DCState *known = malloc(sizeof(DCState));
-
-	uint8_t counter = determineCounter(data, size);
-	size_t keySize = 0;
-
-	for(size_t kri = 0; (keySize = KEY_REPEATS[kri]) != 0; ++kri) {
-		printf("Trying key size %zu\n", keySize);
-		memset( state, 0, sizeof(DCState) );
-		memset( known, 0, sizeof(DCState) );
-		state->counter = known->counter = counter;
-		state->keySize = known->keySize = keySize;
-		if(determineKey( data, size, state, known ))
-			break;
+	if(inKey) {
+		state->keySize = fileSize(inKey);
+		known->keySize = state->keySize;
+		fread(&state->key, 1, state->keySize, inKey);
+		memset(&known->key, 0xFF, MAX_KEY_REPEAT);
+		fclose(inKey);
+		inKey = NULL;
 	}
 
-	if(keySize == 0) {
-		printf("Couldn't find key size\n");
-		goto done;
+	if(inScramble) {
+		long scrambleSize = fileSize(inScramble);
+		if(state->keySize && state->keySize != scrambleSize) {
+			printf("Key has length %zu but scramble has length %ld", state->keySize, scrambleSize);
+			goto done;
+		} else {
+			state->keySize = scrambleSize;
+			known->keySize = state->keySize;
+		}
+		fread(&state->scramble, 1, scrambleSize, inScramble);
+		memset(&known->scramble, 0xFF, MAX_KEY_REPEAT);
+		fclose(inScramble);
+		inScramble = NULL;
+	}
+
+	if(!counterSet) counter = determineCounter(data, size);
+	state->counter = counter;
+
+	if(state->keySize == 0) {
+		size_t keySize = 0;
+
+		for(size_t kri = 0; (keySize = KEY_REPEATS[kri]) != 0; ++kri) {
+			printf("Trying key size %zu\n", keySize);
+			memset( state, 0, sizeof(DCState) );
+			memset( known, 0, sizeof(DCState) );
+			state->counter = known->counter = counter;
+			state->keySize = known->keySize = keySize;
+			if(determineKey( data, size, state, known ))
+				break;
+		}
+
+		if(keySize == 0) {
+			printf("Couldn't find key size\n");
+			goto done;
+		}
 	}
 
 	if(knownBits(known->scramble) < known->keySize*8) {
@@ -342,7 +420,6 @@ int main(int argc, char *argv[]) {
 					int adj = (fi%2==0) ? 0 : 1;
 
 					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 6; si += 2) {
-						bool success = true;
 						memcpy( orig_state, state, sizeof(DCState) );
 						memcpy( orig_known, known, sizeof(DCState) );
 
@@ -367,7 +444,6 @@ int main(int argc, char *argv[]) {
 					int adj = (fi%2==0) ? 0 : 1;
 
 					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 6; si += 2) {
-						bool success = true;
 						memcpy( orig_state, state, sizeof(DCState) );
 						memcpy( orig_known, known, sizeof(DCState) );
 
@@ -387,28 +463,36 @@ int main(int argc, char *argv[]) {
 
 	}
 
-
 	printf("Known scramble bits: %d/%zu\n", knownBits(known->scramble), known->keySize*8 );
 	printf("Known key bits: %d/%zu\n", knownBits(known->key), known->keySize*8 );
 
 	printKnownBits( state->scramble, known->scramble );
 	printKnownBits( state->key, known->key );
 
-	if(argc==3) {
+	if(outKey      != NULL) writeFile( "key",      outKey,      &state->key,      state->keySize  );
+	if(outScramble != NULL) writeFile( "scramble", outScramble, &state->scramble, state->keySize  );
+	if(outState    != NULL) writeFile( "state",    outState,    state,           sizeof(DCState) );
+
+	if(outFile!=NULL) {
 		void * out = decryptData(data, size, state); 
-		FILE * ofp = fopen(argv[2], "wb");
-		size_t wroteBytes = fwrite(out, 1, size, ofp);
-		fclose(ofp);
-		printf("Wrote %zu/%zu bytes to %s\n", wroteBytes, size, argv[2]);
+		writeFile("decrypted data", outFile, out, size);
 		free(out);
 	}
 
 	status = EXIT_SUCCESS;
 
 done:
-	free(data);
-	free(state);
-	free(known);
+	if(data) free(data);
+	if(state) free(state);
+	if(known) free(known);
+
+	if(inFile) fclose(inFile);
+	if(outFile) fclose(outFile);
+	if(inKey) fclose(inKey);
+	if(outKey) fclose(outKey);
+	if(inScramble) fclose(inScramble);
+	if(outScramble) fclose(outScramble);
+	if(outState) fclose(outState);
 	return status;
 }
 
