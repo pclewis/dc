@@ -138,7 +138,7 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 	uint8_t *key             = state->key      + keyOffset;
 	uint8_t *scramblePattern = state->scramble + keyOffset;
 
-#define COLLISION(type, n) { /* printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); */ return false; }
+#define COLLISION(type, n) { printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); return false; }
 	assert( (offset % 2) == 0 );
 
 	for(size_t bitNum = 0; bitNum < 8; ++bitNum) {
@@ -156,10 +156,8 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 			assert( BIT_IS_SET(cipherBytes, bitNum*2) == BIT_IS_SET(cipherBytes, bitNum*2+1));
 			bool bit = BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit;
 			if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)!=bit) COLLISION("key", "0");
-			/*
 			if(bit) *key |= BIT(bitNum);
 			*keyKnown |= BIT(bitNum);
-			*/
 		} else if(counterBit == xbit0) {
 			if( BIT_IS_SET(*scrambleKnown, bitNum) && !BIT_IS_SET(*scramblePattern, bitNum) ) COLLISION( "scramble", "A" );
 		   	*scrambleKnown   |= BIT(bitNum);
@@ -247,7 +245,7 @@ void *decryptData( uint8_t *data, size_t size, DCState *state ) {
 
 
 void usage(char *pname) {
-	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-O outstate] <infile> [outfile]\n", pname);
+	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-O outstate] [-p plaintext] <infile> [outfile]\n", pname);
 	printf("\n");
 }
 
@@ -280,6 +278,7 @@ int main(int argc, char *argv[]) {
 	FILE *outState    = NULL;
 	FILE *inFile      = NULL;
 	FILE *outFile     = NULL;
+	FILE *plainText   = NULL;
 	uint8_t counter   = 0;
 	bool counterSet   = false;
 	void *data        = NULL;
@@ -288,13 +287,14 @@ int main(int argc, char *argv[]) {
 	DCState *known = calloc(1, sizeof(DCState));
 
 	int c;
-	while((c = getopt(argc, argv, "hk:K:s:S:c:O:")) != -1) {
+	while((c = getopt(argc, argv, "hk:K:s:S:c:O:p:")) != -1) {
 		switch(c) {
 			case 'k': inKey       = confirmOpen(optarg, "rb"); break;
 			case 'K': outKey      = confirmOpen(optarg, "wb"); break;
 			case 's': inScramble  = confirmOpen(optarg, "rb"); break;
 			case 'S': outScramble = confirmOpen(optarg, "wb"); break;
 			case 'O': outState    = confirmOpen(optarg, "wb"); break;
+			case 'p': plainText   = confirmOpen(optarg, "rb"); break;
 			case 'c': 
 				counter = atoi(optarg);
 				counterSet = true;
@@ -369,6 +369,28 @@ int main(int argc, char *argv[]) {
 		if(keySize == 0) {
 			printf("Couldn't find key size\n");
 			goto done;
+		}
+	}
+
+	if(knownBits(known->scramble) < known->keySize*8 && plainText) {
+		size_t ptSize = fileSize(plainText);
+		if(ptSize != size) {
+			printf("Ciphertext has length %zu but plaintext has length %zu\n", size, ptSize);
+			goto done;
+		}
+		uint8_t *ptData = malloc(size);
+		fread(ptData, 1, size, plainText);
+		fclose(plainText); plainText = NULL;
+
+//		memset(known->key, 0, MAX_KEY_REPEAT);
+//		memset(known->scramble, 0, MAX_KEY_REPEAT);
+
+		for(size_t i = 0; i < size-1; i += 2) {
+			uint16_t ptw = ptData[i] << 8 | ptData[i+1];
+			if(!deriveKey(data, i, ptw, 0xFFFF, state, known)) {
+				printf("blew up deriving key from plaintext!\n");
+				goto done;
+			}
 		}
 	}
 
@@ -493,6 +515,7 @@ done:
 	if(inScramble) fclose(inScramble);
 	if(outScramble) fclose(outScramble);
 	if(outState) fclose(outState);
+	if(plainText) fclose(plainText);
 	return status;
 }
 
