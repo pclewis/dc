@@ -151,6 +151,7 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 		bool xbit0        = BIT_IS_SET(cipherBytes, bitNum * 2 + 0) ^ ptCounterBit;
 		bool xbit1        = BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptCounterBit;
 
+		if(counterBit != xbit0 && counterBit != xbit1) return false;
 		if(xbit0 == xbit1) {
 			// Don't know if it's scrambled, but the key is the same either way
 			assert( BIT_IS_SET(cipherBytes, bitNum*2) == BIT_IS_SET(cipherBytes, bitNum*2+1));
@@ -159,19 +160,18 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 			if(bit) *key |= BIT(bitNum);
 			*keyKnown |= BIT(bitNum);
 		} else if(counterBit == xbit0) {
-			if( BIT_IS_SET(*scrambleKnown, bitNum) && !BIT_IS_SET(*scramblePattern, bitNum) ) COLLISION( "scramble", "A" );
+			bool bit = BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit;
+			if(BIT_IS_SET(*scrambleKnown, bitNum) && !BIT_IS_SET(*scramblePattern, bitNum)) COLLISION( "scramble", "A" );
+			if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)!=bit) COLLISION("key", "A");
 		   	*scrambleKnown   |= BIT(bitNum);
 			*scramblePattern |= BIT(bitNum);
-			bool bit = BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptKeyBit ^ oppositeCounterBit;
-			if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)!=bit) COLLISION("key", "A");
 			if(bit) *key |= BIT(bitNum);
 			*keyKnown |= BIT(bitNum);
-		} else {
-			if( BIT_IS_SET(*scrambleKnown, bitNum) && BIT_IS_SET(*scramblePattern, bitNum) ) COLLISION("scramble", "B");
-			*scrambleKnown |= BIT(bitNum);
-
+		} else if(counterBit == xbit1) {
 			bool bit = BIT_IS_SET(cipherBytes, bitNum * 2) ^ ptKeyBit ^ oppositeCounterBit;
+			if(BIT_IS_SET(*scrambleKnown, bitNum) && BIT_IS_SET(*scramblePattern, bitNum)) COLLISION("scramble", "B");
 			if(BIT_IS_SET(*keyKnown, bitNum) && BIT_IS_SET(*key, bitNum)!=bit) COLLISION("key", "B");
+			*scrambleKnown |= BIT(bitNum);
 			if(bit) *key |= BIT(bitNum);
 			*keyKnown |= BIT(bitNum);
 		}
@@ -370,7 +370,13 @@ int main(int argc, char *argv[]) {
 			printf("Couldn't find key size\n");
 			goto done;
 		}
+	} else if(knownBits(known->scramble) < known->keySize*8 && plainText) {
+		printf("running determine key\n");
+		determineKey( data, size, state, known );
 	}
+
+	printf("Known scramble bits: %d/%zu\n", knownBits(known->scramble), known->keySize*8 );
+	printf("Known key bits: %d/%zu\n", knownBits(known->key), known->keySize*8 );
 
 	if(knownBits(known->scramble) < known->keySize*8 && plainText) {
 		size_t ptSize = fileSize(plainText);
@@ -395,95 +401,63 @@ int main(int argc, char *argv[]) {
 	}
 
 	if(knownBits(known->scramble) < known->keySize*8) {
-		printf("Not enough scramble bits, trying to find 0x00 frames\n");
+		printf("Not enough scramble bits, looking for runs of 0x00 or 0xFF\n");
 		DCState *orig_state = malloc(sizeof(DCState));
 		DCState *orig_known = malloc(sizeof(DCState));
 
 		/* Last byte in file is always 0x00  */
 		if(!deriveKey( data, size - 2, 0x0000, 0x00FF, state, known )) printf("Last byte not 0?\n");
 
-		/* First byte after first frame header is always 0x00  */
+		/* First byte after first frame header is always 0x00, next byte is always 0x0_  */
 		size_t ffh = findNextFrameHeader(data, size, 0, 1);
 		if(ffh%2==0) {
-			if(!deriveKey( data, ffh+4, 0x0000, 0xFF00, state, known )) printf("no 0 after first frame header?\n");
+			if(!deriveKey( data, ffh+4, 0x0000, 0xFFF0, state, known )) printf("no 0 after first frame header?\n");
 		} else {
 			if(!deriveKey( data, ffh+3, 0x0000, 0x00FF, state, known )) printf("no 0 after first frame header?\n");;
+			if(!deriveKey( data, ffh+7, 0x0000, 0xF000, state, known )) printf("no 0 after first frame header?\n");;
 		}
 
-		int zf = 0;
-		for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
-			for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
-				int adj = (fi%2==0) ? 1 : 0;
-				bool success = true;
-				memcpy( orig_state, state, sizeof(DCState) );
-				memcpy( orig_known, known, sizeof(DCState) );
-				for(size_t i = fi + 0x21 + adj; i < fi + FRAME_SIZE - 1; i += 2) {
-					if( !deriveKey( data, i, 0x0000, 0xFFFF, state, known ) ) {
-						success = false;
-						break;
-					}
-				}
-				if(!success) {
-					memcpy( state, orig_state, sizeof(DCState) );
-					memcpy( known, orig_known, sizeof(DCState) );
-				} else {
-					zf++;
-				}
-			}
-			if(knownBits(known->key) >= known->keySize*8) break; 
-		}
-
-		printf("Found %d 0x00 frames\n", zf);
-		
-		if(knownBits(known->scramble) < known->keySize*8) {
-			printf("Still not enough scramble bits, trying to find runs of 0x000000000000\n");
-			for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
-				for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
-					int adj = (fi%2==0) ? 0 : 1;
-
-					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 6; si += 2) {
-						memcpy( orig_state, state, sizeof(DCState) );
-						memcpy( orig_known, known, sizeof(DCState) );
-
-						if(!deriveKey(data, si, 0x0000, 0xFFFF, state, known) ||
-							!deriveKey(data, si+2, 0x0000, 0xFFFF, state, known) ||
-							!deriveKey(data, si+4, 0x0000, 0xFFFF, state, known)) {
-							memcpy( state, orig_state, sizeof(DCState) );
-							memcpy( known, orig_known, sizeof(DCState) );
-						} else {
-							si += 4;
+		int ff = 0;
+		for(int fie = 0; fie < 2; ++fie) {
+			for(int minRunSize = 256; minRunSize >= 2; minRunSize /= 2) {
+				printf("min run size: %d\n", minRunSize);
+				for(uint16_t r = 0x0000; r != 0xFFFE; r += 0xFFFF) { // dumb hack: for r in [0x0000, 0xFFFF]
+					for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
+						for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
+							int adj = (fi%2==0) ? 0 : 1;
+							for(size_t si = fi + 4+adj; si < fi + FRAME_SIZE - minRunSize; si += 2) {
+								int count = 0;
+								memcpy( orig_state, state, sizeof(DCState) );
+								memcpy( orig_known, known, sizeof(DCState) );
+								for(size_t i = si; i < fi + FRAME_SIZE - 1; i += 2) {
+									if( deriveKey( data, i, r, 0xFFFF, state, known ) ) {
+										count++;
+									} else {
+										break;
+									}
+								}
+								if(count < minRunSize) {
+									memcpy( state, orig_state, sizeof(DCState) );
+									memcpy( known, orig_known, sizeof(DCState) );
+								} else {
+									if(!fie) {
+										memcpy( state, orig_state, sizeof(DCState) );
+										memcpy( known, orig_known, sizeof(DCState) );
+										for(size_t i = si + 2; i < si + (count*2) -2; i += 2) {
+											deriveKey( data, i, r, 0xFFFF, state, known );
+										}
+									}
+									ff++;
+								}
+							}
 						}
+						if(knownBits(known->key) >= known->keySize*8) break; 
 					}
 				}
-				if(knownBits(known->key) >= known->keySize*8) break; 
 			}
 		}
 
-		if(knownBits(known->scramble) < known->keySize*8) {
-			printf("Still not enough scramble bits, trying to find runs of 0xFFFFFFFFFFFF\n");
-			for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
-				for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
-					int adj = (fi%2==0) ? 0 : 1;
-
-					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 6; si += 2) {
-						memcpy( orig_state, state, sizeof(DCState) );
-						memcpy( orig_known, known, sizeof(DCState) );
-
-						if(!deriveKey(data, si, 0xFFFF, 0xFFFF, state, known) ||
-							!deriveKey(data, si+2, 0xFFFF, 0xFFFF, state, known) ||
-							!deriveKey(data, si+4, 0xFFFF, 0xFFFF, state, known)) {
-							memcpy( state, orig_state, sizeof(DCState) );
-							memcpy( known, orig_known, sizeof(DCState) );
-						} else {
-							si += 4;
-						}
-					}
-				}
-				if(knownBits(known->key) >= known->keySize*8) break; 
-			}
-		}
-
-
+		printf("Found %d runs\n", ff);
 	}
 
 	printf("Known scramble bits: %d/%zu\n", knownBits(known->scramble), known->keySize*8 );
