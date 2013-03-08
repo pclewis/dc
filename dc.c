@@ -137,7 +137,7 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 	uint8_t *key             = state->key      + keyOffset;
 	uint8_t *scramblePattern = state->scramble + keyOffset;
 
-#define COLLISION(type, n) { printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); return false; }
+#define COLLISION(type, n) { /* printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); */ return false; }
 	assert( (offset % 2) == 0 );
 
 	for(size_t bitNum = 0; bitNum < 8; ++bitNum) {
@@ -288,17 +288,116 @@ int main(int argc, char *argv[]) {
 	}
 
 	if(knownBits(known->key) < known->keySize*8) {
-		printf("Not enough key bits, guessing end frames are 0x00\n");
-		for(size_t bi = findNextFrameHeader(data, size, size-FRAME_SIZE, -1); bi > size - LOOP_OFFSET/4 && bi < size; bi = findNextFrameHeader(data, size, bi - FRAME_SIZE, -1)) {
-			printf("fh: %zu\n", bi);
-			for(size_t i = bi + 0x21; i < bi + FRAME_SIZE - 1; i += 2) {
-				if(i%2==0) 
-					deriveKey( data, i, 0x0000, 0xFFFF, state, known );
-				else
-					deriveKey( data, i+1, 0x0000, 0xFFFF, state, known );
+		printf("Not enough key bits, trying to find 0x00 frames\n");
+		DCState *orig_state = malloc(sizeof(DCState));
+		DCState *orig_known = malloc(sizeof(DCState));
+
+		/* Last byte in file is always 0x00 
+		deriveKey( data, size - 2, 0x0000, 0x00FF, state, known );
+
+		 First byte after first frame header is always 0x00 
+		size_t ffh = findNextFrameHeader(data, size, 0, 1);
+		if(ffh%2==0)
+			deriveKey( data, ffh+4, 0x0000, 0xFF00, state, known );
+		else
+			deriveKey( data, ffh+3, 0x0000, 0x00FF, state, known );
+			*/
+
+		for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
+			for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
+				int adj = (fi%2==0) ? 1 : 0;
+				bool success = true;
+				memcpy( orig_state, state, sizeof(DCState) );
+				memcpy( orig_known, known, sizeof(DCState) );
+				for(size_t i = fi + 0x23 + adj; i < fi + FRAME_SIZE - 1; i += 2) {
+					if( !deriveKey( data, i, 0x0000, 0xFFFF, state, known ) ) {
+						success = false;
+						break;
+					}
+				}
+				if(!success) {
+					memcpy( state, orig_state, sizeof(DCState) );
+					memcpy( known, orig_known, sizeof(DCState) );
+				}
+			}
+			if(knownBits(known->key) >= known->keySize*8) break; 
+		}
+
+		if(knownBits(known->key) < known->keySize*8) {
+			printf("Still not enough key bits, trying to find runs of 0xFFFFFFFFFFFF\n");
+			for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
+				for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
+					int adj = (fi%2==0) ? 0 : 1;
+
+					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 6; si += 2) {
+						bool success = true;
+						memcpy( orig_state, state, sizeof(DCState) );
+						memcpy( orig_known, known, sizeof(DCState) );
+
+						if(!deriveKey(data, si, 0xFFFF, 0xFFFF, state, known) ||
+							!deriveKey(data, si+2, 0xFFFF, 0xFFFF, state, known) ||
+							!deriveKey(data, si+4, 0xFFFF, 0xFFFF, state, known)) {
+							memcpy( state, orig_state, sizeof(DCState) );
+							memcpy( known, orig_known, sizeof(DCState) );
+						} else {
+							si += 4;
+						}
+					}
+				}
+				if(knownBits(known->key) >= known->keySize*8) break; 
+			}
+		}
+
+		if(knownBits(known->key) < known->keySize*8) {
+			printf("Still not enough key bits, trying to find runs of 0x000000000000\n");
+			for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
+				for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
+					int adj = (fi%2==0) ? 0 : 1;
+
+					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 6; si += 2) {
+						bool success = true;
+						memcpy( orig_state, state, sizeof(DCState) );
+						memcpy( orig_known, known, sizeof(DCState) );
+
+						if(!deriveKey(data, si, 0x0000, 0xFFFF, state, known) ||
+							!deriveKey(data, si+2, 0x0000, 0xFFFF, state, known) ||
+							!deriveKey(data, si+4, 0x0000, 0xFFFF, state, known)) {
+							memcpy( state, orig_state, sizeof(DCState) );
+							memcpy( known, orig_known, sizeof(DCState) );
+						} else {
+							si += 4;
+						}
+					}
+				}
+				if(knownBits(known->key) >= known->keySize*8) break; 
+			}
+		}
+
+		if(knownBits(known->key) < known->keySize*8) {
+			printf("Still not enough key bits, trying to find runs of 0xFFFFFFFF\n");
+			for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
+				for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
+					int adj = (fi%2==0) ? 0 : 1;
+
+					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 4; si += 2) {
+						bool success = true;
+						memcpy( orig_state, state, sizeof(DCState) );
+						memcpy( orig_known, known, sizeof(DCState) );
+
+						if(!deriveKey(data, si, 0xFFFF, 0xFFFF, state, known) ||
+							!deriveKey(data, si+2, 0xFFFF, 0xFFFF, state, known)) {
+							memcpy( state, orig_state, sizeof(DCState) );
+							memcpy( known, orig_known, sizeof(DCState) );
+						} else {
+							si += 2;
+						}
+					}
+				}
+				if(knownBits(known->key) >= known->keySize*8) break; 
 			}
 		}
 	}
+
 
 	//printf("Known scramble bits: %d/%zu\n", knownBits(known->scramble), known->keySize*8 );
 	printf("Known key bits: %d/%zu\n", knownBits(known->key), known->keySize*8 );
