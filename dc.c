@@ -62,7 +62,7 @@ size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start) {
 }
 
 void swapBytes(uint8_t *data, size_t size) {
-	for(size_t i = 0; i < size-2; i += 2) {
+	for(size_t i = 0; i < size-1; i += 2) {
 		uint8_t tmp = data[i];
 		data[i] = data[i+1];
 		data[i+1] = tmp;
@@ -296,9 +296,10 @@ int main(int argc, char *argv[]) {
 	if(argc==3) {
 		void * out = decryptData(data, size, state); 
 		FILE * ofp = fopen(argv[2], "wb");
-		fwrite(out, size, 1, ofp);
+		size_t wroteBytes = fwrite(out, 1, size, ofp);
 		fclose(ofp);
-		printf("Wrote %zu bytes to %s\n", size, argv[2]);
+		printf("Wrote %zu/%zu bytes to %s\n", wroteBytes, size, argv[2]);
+		free(out);
 	}
 
 	status = EXIT_SUCCESS;
