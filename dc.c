@@ -245,7 +245,7 @@ void *decryptData( uint8_t *data, size_t size, DCState *state ) {
 
 
 void usage(char *pname) {
-	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-O outstate] [-p plaintext] <infile> [outfile]\n", pname);
+	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-o instate] [-O outstate] [-p plaintext] <infile> [outfile]\n", pname);
 	printf("\n");
 }
 
@@ -275,6 +275,7 @@ int main(int argc, char *argv[]) {
 	FILE *outKey      = NULL;
 	FILE *inScramble  = NULL;
 	FILE *outScramble = NULL;
+	FILE *inState     = NULL;
 	FILE *outState    = NULL;
 	FILE *inFile      = NULL;
 	FILE *outFile     = NULL;
@@ -287,12 +288,13 @@ int main(int argc, char *argv[]) {
 	DCState *known = calloc(1, sizeof(DCState));
 
 	int c;
-	while((c = getopt(argc, argv, "hk:K:s:S:c:O:p:")) != -1) {
+	while((c = getopt(argc, argv, "hk:K:s:S:c:o:O:p:")) != -1) {
 		switch(c) {
 			case 'k': inKey       = confirmOpen(optarg, "rb"); break;
 			case 'K': outKey      = confirmOpen(optarg, "wb"); break;
 			case 's': inScramble  = confirmOpen(optarg, "rb"); break;
 			case 'S': outScramble = confirmOpen(optarg, "wb"); break;
+			case 'o': inState     = confirmOpen(optarg, "rb"); break;
 			case 'O': outState    = confirmOpen(optarg, "wb"); break;
 			case 'p': plainText   = confirmOpen(optarg, "rb"); break;
 			case 'c': 
@@ -325,6 +327,13 @@ int main(int argc, char *argv[]) {
 
 	printf("Swapping bytes\n");
 	swapBytes(data, size);
+
+	if(inState) {
+		fread(state, 1, sizeof(DCState), inState);
+		fclose(inState); inState = NULL;
+		memset(&known->key, 0xFF, state->keySize);
+		memset(&known->scramble, 0xFF, state->keySize);
+	}
 
 	if(inKey) {
 		state->keySize = fileSize(inKey);
@@ -491,6 +500,7 @@ done:
 	if(outKey) fclose(outKey);
 	if(inScramble) fclose(inScramble);
 	if(outScramble) fclose(outScramble);
+	if(inState) fclose(inState);
 	if(outState) fclose(outState);
 	if(plainText) fclose(plainText);
 	return status;
