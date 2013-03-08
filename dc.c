@@ -38,14 +38,14 @@ void die(char *fmt, ...) {
 	exit(EXIT_FAILURE);
 }
 
-size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start) {
+size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start, int dir) {
 	size_t i = 0;
 
-	for(i = start; i < size; ++i) {
-		if( data[i] == data[LOOP_OFFSET+i] && data[i+1] == data[LOOP_OFFSET+i+1]) {
+	for(i = start; i < size; i += dir) {
+		if( data[i] == data[dir*LOOP_OFFSET+i] && data[i+1] == data[dir*LOOP_OFFSET+i+1]) {
 			uint8_t b1 = data[i], b2 = data[i+1], b3 = data[i+2] & FH_B3_MASK, b4 = data[i+3] & FH_B4_MASK;
 			bool found = true;
-			for(size_t j = i; j < (size-4); j += LOOP_OFFSET) {
+			for(size_t j = i % LOOP_OFFSET; j < (size-4); j += LOOP_OFFSET) {
 				if(data[j] != b1 || data[j+1] != b2 || (data[j+2] & FH_B3_MASK) != b3 || (data[j+3] & FH_B4_MASK) != b4) {
 					//if (i == 0) printf("No frame at 0 (%u): (%02x, %02x, %02x, %02x) (%02x, %02x, %02x, %02x)\n", j, data[j], data[j+1], data[j+2] & FH_B3_MASK, data[j+3] & FH_B4_MASK, b1, b2, b3, b4);
 					found = false;
@@ -104,7 +104,7 @@ uint8_t determineCounter(uint8_t *data, size_t size) {
 		size_t i = 0;
 		bool works = true;
 		while(i < LOOP_OFFSET && i < size) {
-			i = findNextFrameHeader(data, size, i);
+			i = findNextFrameHeader(data, size, i, 1);
 			if(!counterWorks(counter, data, i)) {
 				//printf("%d abandonded at %d\n", counter, i);
 				works = false;
@@ -175,7 +175,7 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 
 bool determineKey( uint8_t *data, size_t size, DCState *state, DCState *known ) {
 	size_t i = 0;
-	for(i = findNextFrameHeader(data, size, 0); i < (LOOP_OFFSET-4) && i < (size-4); i = findNextFrameHeader(data, size, i + FRAME_SIZE)) {
+	for(i = findNextFrameHeader(data, size, 0, 1); i < (LOOP_OFFSET-4) && i < (size-4); i = findNextFrameHeader(data, size, i + FRAME_SIZE, 1)) {
 		if((i%2) == 0) {
 			if (!deriveKey( data, i+0, 0xFFFB, 0xFFFF,              state, known)) return false;
 			if (!deriveKey( data, i+2, 0x9000, FH_B34_MASK,         state, known)) return false;
@@ -287,7 +287,20 @@ int main(int argc, char *argv[]) {
 		goto done;
 	}
 
-	printf("Known scramble bits: %d/%zu\n", knownBits(known->scramble), known->keySize*8 );
+	if(knownBits(known->key) < known->keySize*8) {
+		printf("Not enough key bits, guessing end frames are 0x00\n");
+		for(size_t bi = findNextFrameHeader(data, size, size-FRAME_SIZE, -1); bi > size - LOOP_OFFSET/4 && bi < size; bi = findNextFrameHeader(data, size, bi - FRAME_SIZE, -1)) {
+			printf("fh: %zu\n", bi);
+			for(size_t i = bi + 0x21; i < bi + FRAME_SIZE - 1; i += 2) {
+				if(i%2==0) 
+					deriveKey( data, i, 0x0000, 0xFFFF, state, known );
+				else
+					deriveKey( data, i+1, 0x0000, 0xFFFF, state, known );
+			}
+		}
+	}
+
+	//printf("Known scramble bits: %d/%zu\n", knownBits(known->scramble), known->keySize*8 );
 	printf("Known key bits: %d/%zu\n", knownBits(known->key), known->keySize*8 );
 
 	printKnownBits( state->scramble, known->scramble );
