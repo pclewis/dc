@@ -330,7 +330,7 @@ int main(int argc, char *argv[]) {
 		state->keySize = fileSize(inKey);
 		known->keySize = state->keySize;
 		fread(&state->key, 1, state->keySize, inKey);
-		memset(&known->key, 0xFF, MAX_KEY_REPEAT);
+		memset(&known->key, 0xFF, state->keySize);
 		fclose(inKey);
 		inKey = NULL;
 	}
@@ -345,7 +345,7 @@ int main(int argc, char *argv[]) {
 			known->keySize = state->keySize;
 		}
 		fread(&state->scramble, 1, scrambleSize, inScramble);
-		memset(&known->scramble, 0xFF, MAX_KEY_REPEAT);
+		memset(&known->scramble, 0xFF, scrambleSize);
 		fclose(inScramble);
 		inScramble = NULL;
 	}
@@ -370,7 +370,7 @@ int main(int argc, char *argv[]) {
 			printf("Couldn't find key size\n");
 			goto done;
 		}
-	} else if(knownBits(known->scramble) < known->keySize*8 && plainText) {
+	} else if(knownBits(known->scramble) < known->keySize*8) {
 		printf("running determine key\n");
 		determineKey( data, size, state, known );
 	}
@@ -405,6 +405,7 @@ int main(int argc, char *argv[]) {
 		DCState *orig_state = malloc(sizeof(DCState));
 		DCState *orig_known = malloc(sizeof(DCState));
 
+#if 0
 		/* Last byte in file is always 0x00  */
 		if(!deriveKey( data, size - 2, 0x0000, 0x00FF, state, known )) printf("Last byte not 0?\n");
 
@@ -416,6 +417,7 @@ int main(int argc, char *argv[]) {
 			if(!deriveKey( data, ffh+3, 0x0000, 0x00FF, state, known )) printf("no 0 after first frame header?\n");;
 			if(!deriveKey( data, ffh+7, 0x0000, 0xF000, state, known )) printf("no 0 after first frame header?\n");;
 		}
+#endif
 
 		int ff = 0;
 		for(int fie = 0; fie < 2; ++fie) {
@@ -451,7 +453,7 @@ int main(int argc, char *argv[]) {
 								}
 							}
 						}
-						if(knownBits(known->key) >= known->keySize*8) break; 
+						//if(knownBits(known->key) >= known->keySize*8) break; 
 					}
 				}
 			}
