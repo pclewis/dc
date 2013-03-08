@@ -16,7 +16,7 @@
 #define BIT_IS_SET(v,i) ((v&BIT(i))!=0)
 
 #define FH_B3_MASK  0xFC // frames may or may not have the padding bit (bit 2) set, and it may or may not be scrambled, so ignore last two bits
-#define FH_B4_MASK  0x0F // some frame use joint stereo (bits 4,5,6,7), so ignore first 4 bits
+#define FH_B4_MASK  0x03 // some frame use joint stereo (bits 4,5,6,7), or orig/copyright (2,3) so ignore first 6 bits
 #define FH_B34_MASK ((FH_B3_MASK << 8) | FH_B4_MASK)
 
 #define MAX_KEY_REPEAT 240
@@ -138,7 +138,7 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 	uint8_t *key             = state->key      + keyOffset;
 	uint8_t *scramblePattern = state->scramble + keyOffset;
 
-#define COLLISION(type, n) { printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); return false; }
+#define COLLISION(type, n) { /*printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); */return false; }
 	assert( (offset % 2) == 0 );
 
 	for(size_t bitNum = 0; bitNum < 8; ++bitNum) {
@@ -434,6 +434,30 @@ int main(int argc, char *argv[]) {
 		}
 
 		printf("Found %d 0x00 frames\n", zf);
+		
+		if(knownBits(known->scramble) < known->keySize*8) {
+			printf("Still not enough scramble bits, trying to find runs of 0x000000000000\n");
+			for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
+				for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
+					int adj = (fi%2==0) ? 0 : 1;
+
+					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 6; si += 2) {
+						memcpy( orig_state, state, sizeof(DCState) );
+						memcpy( orig_known, known, sizeof(DCState) );
+
+						if(!deriveKey(data, si, 0x0000, 0xFFFF, state, known) ||
+							!deriveKey(data, si+2, 0x0000, 0xFFFF, state, known) ||
+							!deriveKey(data, si+4, 0x0000, 0xFFFF, state, known)) {
+							memcpy( state, orig_state, sizeof(DCState) );
+							memcpy( known, orig_known, sizeof(DCState) );
+						} else {
+							si += 4;
+						}
+					}
+				}
+				if(knownBits(known->key) >= known->keySize*8) break; 
+			}
+		}
 
 		if(knownBits(known->scramble) < known->keySize*8) {
 			printf("Still not enough scramble bits, trying to find runs of 0xFFFFFFFFFFFF\n");
@@ -459,29 +483,6 @@ int main(int argc, char *argv[]) {
 			}
 		}
 
-		if(knownBits(known->scramble) < known->keySize*8) {
-			printf("Still not enough scramble bits, trying to find runs of 0x000000000000\n");
-			for(size_t bi = findNextFrameHeader(data, size, 0, 1); bi < size && bi < LOOP_OFFSET; bi = findNextFrameHeader(data, size, bi + FRAME_SIZE, 1)) {
-				for (size_t fi = bi; fi < size; fi += LOOP_OFFSET) { 
-					int adj = (fi%2==0) ? 0 : 1;
-
-					for(size_t si = fi + adj; si < fi + FRAME_SIZE - 6; si += 2) {
-						memcpy( orig_state, state, sizeof(DCState) );
-						memcpy( orig_known, known, sizeof(DCState) );
-
-						if(!deriveKey(data, si, 0x0000, 0xFFFF, state, known) ||
-							!deriveKey(data, si+2, 0x0000, 0xFFFF, state, known) ||
-							!deriveKey(data, si+4, 0x0000, 0xFFFF, state, known)) {
-							memcpy( state, orig_state, sizeof(DCState) );
-							memcpy( known, orig_known, sizeof(DCState) );
-						} else {
-							si += 4;
-						}
-					}
-				}
-				if(knownBits(known->key) >= known->keySize*8) break; 
-			}
-		}
 
 	}
 
