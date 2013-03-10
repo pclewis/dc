@@ -41,16 +41,21 @@ void die(char *fmt, ...) {
 
 size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start, int dir) {
 	size_t i = 0;
+	unsigned int missesOk = (size / LOOP_OFFSET) / 4;
 
 	for(i = start; i < size; i += dir) {
 		if( data[i] == data[dir*LOOP_OFFSET+i] && data[i+1] == data[dir*LOOP_OFFSET+i+1]) {
 			uint8_t b1 = data[i], b2 = data[i+1], b3 = data[i+2] & FH_B3_MASK, b4 = data[i+3] & FH_B4_MASK;
+			unsigned int miss = 0;
 			bool found = true;
 			for(size_t j = i % LOOP_OFFSET; j < (size-4); j += LOOP_OFFSET) {
 				if(data[j] != b1 || data[j+1] != b2 || (data[j+2] & FH_B3_MASK) != b3 || (data[j+3] & FH_B4_MASK) != b4) {
 					//if (i == 0) printf("No frame at 0 (%u): (%02x, %02x, %02x, %02x) (%02x, %02x, %02x, %02x)\n", j, data[j], data[j+1], data[j+2] & FH_B3_MASK, data[j+3] & FH_B4_MASK, b1, b2, b3, b4);
-					found = false;
-					break;
+					++miss;
+					if(miss > missesOk) {
+						found = false;
+						break;
+					}
 				}
 			}
 			if(found) break;
