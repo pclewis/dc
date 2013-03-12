@@ -8,18 +8,18 @@ all: dc utils
 debug: CFLAGS+=${DEBUG_CFLAGS}
 debug: all
 
-dc: dc.o
+dc: dc.o util.o
 	${CC} ${LDFLAGS} -o $@ $^ ${LIBS}
 
 utils: relation rev xor bitfreq
 
-relation: relation.o
+relation: relation.o util.o
 	${CC} ${LDFLAGS} -o $@ $^ ${LIBS}
-rev: rev.o
+rev: rev.o util.o
 	${CC} ${LDFLAGS} -o $@ $^ ${LIBS}
-xor: xor.o
+xor: xor.o util.o
 	${CC} ${LDFLAGS} -o $@ $^ ${LIBS}
-bitfreq: bitfreq.o
+bitfreq: bitfreq.o util.o
 	${CC} ${LDFLAGS} -o $@ $^ ${LIBS}
 
 .c.o:

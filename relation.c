@@ -3,22 +3,15 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include "util.h"
 
 #define MAX_KEY_SIZE 240
-#define BIT(i)      (1<<(i))
-#define BIT_IS_SET(v,i) ((v&BIT(i))!=0)
 
 typedef struct {
 	int cnt[MAX_KEY_SIZE][8][2];
 	uint8_t value[MAX_KEY_SIZE][8][2][MAX_KEY_SIZE];
 	uint8_t related[MAX_KEY_SIZE][8][2][MAX_KEY_SIZE];
 } Relation;
-
-FILE *confirmOpen(const char *fn, const char *mode) {
-	FILE *fp = fopen(fn, mode);
-	if(!fp) perror(fn);
-	return fp;
-}
 
 void memxorv(uint8_t *dst, uint8_t v, size_t size) {
 	uint8_t *e = dst+size;

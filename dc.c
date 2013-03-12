@@ -6,14 +6,13 @@
 #include <assert.h>
 #include <string.h>
 #include <getopt.h>
+#include "util.h"
 
 #define BLOCK_SIZE  0x1E00
 #define BITRATE     128000
 #define FREQUENCY   44100
 #define FRAME_SIZE  (144 * BITRATE / FREQUENCY)
 #define LOOP_OFFSET 0xF000 // I don't actually understand this value
-#define BIT(i)      (1<<(i))
-#define BIT_IS_SET(v,i) ((v&BIT(i))!=0)
 
 #define FH_B3_MASK  0xFC // frames may or may not have the padding bit (bit 2) set, and it may or may not be scrambled, so ignore last two bits
 #define FH_B4_MASK  0x03 // some frame use joint stereo (bits 4,5,6,7), or orig/copyright (2,3) so ignore first 6 bits
@@ -28,22 +27,6 @@ typedef struct {
 	uint8_t key[MAX_KEY_REPEAT];
 	uint8_t scramble[MAX_KEY_REPEAT];
 } DCState;
-
-void die(char *fmt, ...) {
-	va_list args;
-	va_start(args, fmt);
-	vfprintf(stderr, fmt, args);
-	va_end(args);
-	fprintf(stderr, "\n");
-
-	exit(EXIT_FAILURE);
-}
-
-size_t fread_safe(void *ptr, size_t size, size_t nmemb, FILE *stream) {
-	size_t read = fread(ptr, size, nmemb, stream);
-	if(read != size) die("Bad read: got %zu/%zu bytes.", read, size);
-	return read;
-}
 
 size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start, int dir) {
 	size_t i = 0;
@@ -224,10 +207,6 @@ void printKnownBits(uint8_t *bits, uint8_t *known) {
 	printf("\n");
 }
 
-static inline uint8_t reverseBits(uint8_t b) {// hax
-	return ((b * 0x0802LU & 0x22110LU) | (b * 0x8020LU & 0x88440LU)) * 0x10101LU >> 16; 
-}
-
 /* note: data should already be byte swapped */
 void *decryptData( uint8_t *data, size_t size, DCState *state ) { 
 	uint8_t *result = malloc( size );
@@ -286,25 +265,6 @@ void *encryptData( uint8_t *data, size_t size, DCState *state ) {
 void usage(char *pname) {
 	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-o instate] [-O outstate] [-p plaintext] [-e] <infile> [outfile]\n", pname);
 	printf("\n");
-}
-
-FILE *confirmOpen(const char *fn, const char *mode) {
-	FILE *fp = fopen(fn, mode);
-	if(!fp) perror(fn);
-	return fp;
-}
-
-void writeFile(const char *desc, FILE *fp, void *data, size_t size) {
-	size_t wroteBytes = fwrite(data, 1, size, fp);
-	printf("Wrote %s: %zu/%zu bytes\n", desc, wroteBytes, size);
-}
-
-long fileSize(FILE *fp) {
-	long start = ftell(fp);
-	fseek(fp, 0, SEEK_END);
-	long result = ftell(fp);
-	fseek(fp, start, SEEK_SET);
-	return result;
 }
 
 int main(int argc, char *argv[]) {

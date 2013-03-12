@@ -1,15 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-
-FILE *confirmOpen(const char *fn, const char *mode) {
-	FILE *fp = fopen(fn, mode);
-	if(!fp) perror(fn);
-	return fp;
-}
-
-static inline unsigned char reverseBits(unsigned char b) {// hax
-	return ((b * 0x0802LU & 0x22110LU) | (b * 0x8020LU & 0x88440LU)) * 0x10101LU >> 16; 
-}
+#include "util.h"
 
 int main(int argc, char *argv[]) {
 	int status = EXIT_FAILURE;

@@ -1,24 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
-
-#define BIT(i)      (1<<(i))
-#define BIT_IS_SET(v,i) ((v&BIT(i))!=0)
-
-FILE *confirmOpen(const char *fn, const char *mode) {
-	FILE *fp = fopen(fn, mode);
-	if(!fp) perror(fn);
-	return fp;
-}
+#include "util.h"
 
 int main(int argc, char *argv[]) {
 	int status = EXIT_FAILURE;
+	FILE *f1 = NULL;
 
 	if (argc != 2) {
 		fprintf(stderr, "Usage: %s [f1]\n", argv[0]);
 		goto done;
 	}
 
-	FILE *f1 = confirmOpen(argv[1], "rb");
+	confirmOpen(argv[1], "rb");
 
 	if(!f1) goto done;
 

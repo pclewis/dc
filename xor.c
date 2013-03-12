@@ -1,11 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-
-FILE *confirmOpen(const char *fn, const char *mode) {
-	FILE *fp = fopen(fn, mode);
-	if(!fp) perror(fn);
-	return fp;
-}
+#include "util.h"
 
 int main(int argc, char *argv[]) {
 	int status = EXIT_FAILURE;
