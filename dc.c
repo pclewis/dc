@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <assert.h>
 #include <string.h>
 #include <getopt.h>
@@ -16,6 +17,7 @@
 #define FH_B3_MASK  0xFC // frames may or may not have the padding bit (bit 2) set, and it may or may not be scrambled, so ignore last two bits
 #define FH_B4_MASK  0x03 // some frame use joint stereo (bits 4,5,6,7), or orig/copyright (2,3) so ignore first 6 bits
 #define FH_B34_MASK ((FH_B3_MASK << 8) | FH_B4_MASK)
+#define FH_MASK     (0xFFFF0000 | FH_B34_MASK)
 
 #define MAX_KEY_REPEAT 240
 static const size_t KEY_REPEATS[] = { 30, 40, 48, 60, 80, 120, 240, 0 };
@@ -26,6 +28,94 @@ typedef struct {
 	uint8_t key[MAX_KEY_REPEAT];
 	uint8_t scramble[MAX_KEY_REPEAT];
 } DCState;
+
+typedef struct {
+	uint8_t counter;
+	size_t keySize;
+	unsigned int bitRate;
+	unsigned int frequency;
+	size_t frameSize;
+	size_t loopOffset;
+	uint32_t frameHeader;
+
+	uint8_t *data;
+	size_t size;
+	uint8_t **frameHeaders;
+
+	DCState *state;
+	DCState *known;
+} DCInfo;
+
+// Treat anything within 4 bytes as equal
+// Since we don't know many bits of the last byte of the frame header, the next few bytes may also wind up matching.
+// Ex: for FFFB926000, we might match both (FFFB9260)00 and FF(FB926000)
+static int compareFrameHeaderPointer(const void *v1, const void *v2) {
+	uint8_t *p1 = *(uint8_t**)v1, *p2 = *(uint8_t**)v2;
+	ptrdiff_t diff = p1 - p2;
+	if(diff > -4 && diff < 4) return 0;
+	return (p1 < p2) ? -1 : 1;
+}
+
+/**
+ * Search for frame headers in an encrypted buffer.
+ * 
+ * @param  data        Buffer to search
+ * @param  size        Size of buffer
+ * @param  loopOffset  How far apart perfectly matching bytes will appear.
+ * @return             New array of pointers into data. NULL-terminated. Order is undefined. Caller must free.
+ */
+static uint8_t **findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset) {
+	uint8_t **result = calloc(1024, sizeof(*result));
+	size_t n_results = 0, n_allocated = 1024;
+	unsigned int requiredMatches = (size / loopOffset) * 3/4;
+
+	// naive, but simple: for every index in every segment of loopOffset bytes, see if we can find the required number of matches in future segments.
+	for(size_t i = 0; i <= (loopOffset - 4); ++i) {
+		for(size_t j = i; j <= (size - (loopOffset * requiredMatches) - 4); j += loopOffset) {
+			uint32_t value = ((data[j] << 24) | (data[j+1] << 16) | (data[j+2] << 8) | data[j]) & FH_MASK;
+			bool doAdd = false;
+
+			while(true) { // First iteration: count matches, second iteration: add to list.
+				unsigned int n_matches = 0, start_n_results = n_results;
+				for(size_t k = j; k <= (size - 4); k += loopOffset) {
+					// Don't match anything we've already added or that contains part of what we've already added.
+					void *ptr = &data[k];
+					if(bsearch(&ptr, result, start_n_results, sizeof(*result), compareFrameHeaderPointer) != NULL)
+						continue;
+
+					uint32_t compare = ((data[k] << 24) | (data[k+1] << 16) | (data[k+2] << 8) | data[k]) & FH_MASK;
+					if(value == compare) {
+						if(doAdd) {
+							if(n_results >= n_allocated) {
+								n_allocated *= 2;
+								result = realloc_safe(result, sizeof(*result) * n_allocated);
+							}
+							result[n_results] = &data[k];
+							n_results += 1;
+						} else {
+							n_matches += 1;
+							if(n_matches >= requiredMatches) break;
+						}
+					}
+				}
+
+				if(!doAdd && n_matches >= requiredMatches) {
+					doAdd = true;
+					continue;
+				}
+				break;
+			}
+
+			if(doAdd) {
+				qsort(result, n_results, sizeof(*result), compareFrameHeaderPointer);
+			}
+		}
+	}
+
+	result = realloc_safe(result, sizeof(*result) * n_results + 1);
+	result[n_results] = NULL;
+	return result;
+}
 
 size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start, int dir) {
 	size_t i = 0;
@@ -285,7 +375,7 @@ int main(int argc, char *argv[]) {
 	FILE *plainText   = NULL;
 	uint8_t counter   = 0;
 	bool counterSet   = false;
-	void *data        = NULL;
+	uint8_t *data     = NULL;
 	bool encrypt      = false;
 
 	DCState *state = calloc(1, sizeof(DCState));
@@ -328,6 +418,14 @@ int main(int argc, char *argv[]) {
 	fread_safe(data, 1, size, inFile);
 	fclose(inFile);
 	inFile = NULL;
+
+	uint8_t **frameHeaders = findFrameHeaders(data, size, 0xF000);
+
+	for(uint8_t **fh = frameHeaders; *fh != NULL; ++fh) {
+		printf("Frame header: %zu\n", *fh - data);
+	}
+
+	goto done;
 
 	if(!encrypt) {
 		printf("Swapping bytes\n");

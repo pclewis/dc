@@ -41,3 +41,9 @@ size_t fileSize(FILE *fp) {
 	assert(result > 0);
 	return result;
 }
+
+void *realloc_safe(void *ptr, size_t size) {
+	void *result = realloc(ptr, size);
+	if(result == NULL) die("Realloc failed. Requested size: %zu", size); // note ptr is unfreed
+	return result;
+} 
