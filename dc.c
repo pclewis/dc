@@ -39,6 +39,12 @@ void die(char *fmt, ...) {
 	exit(EXIT_FAILURE);
 }
 
+size_t fread_safe(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+	size_t read = fread(ptr, size, nmemb, stream);
+	if(read != size) die("Bad read: got %zu/%zu bytes.", read, size);
+	return read;
+}
+
 size_t findNextFrameHeader(uint8_t *data, size_t size, size_t start, int dir) {
 	size_t i = 0;
 	unsigned int missesOk = (size / LOOP_OFFSET) / 4;
@@ -355,8 +361,7 @@ int main(int argc, char *argv[]) {
 
 	data = malloc( size );
 
-	size_t readBytes = fread(data, 1, size, inFile);
-	if(readBytes < size) die("Read %zu of %zu bytes", readBytes, size);
+	fread_safe(data, 1, size, inFile);
 	fclose(inFile);
 	inFile = NULL;
 
@@ -371,7 +376,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	if(inState) {
-		fread(state, 1, sizeof(DCState), inState);
+		fread_safe(state, 1, sizeof(DCState), inState);
 		fclose(inState); inState = NULL;
 		known->keySize = state->keySize;
 		memset(&known->key, 0xFF, state->keySize);
@@ -381,16 +386,15 @@ int main(int argc, char *argv[]) {
 	}
 
 	if(inKey) {
-		state->keySize = fileSize(inKey);
+		state->keySize = fread(&state->key, 1, MAX_KEY_REPEAT, inKey);
 		known->keySize = state->keySize;
-		fread(&state->key, 1, state->keySize, inKey);
 		memset(&known->key, 0xFF, state->keySize);
 		fclose(inKey);
 		inKey = NULL;
 	}
 
 	if(inScramble) {
-		long scrambleSize = fileSize(inScramble);
+		size_t scrambleSize = fread(&state->scramble, 1, MAX_KEY_REPEAT, inScramble);
 		if(state->keySize && state->keySize != scrambleSize) {
 			printf("Key has length %zu but scramble has length %ld", state->keySize, scrambleSize);
 			goto done;
@@ -398,7 +402,6 @@ int main(int argc, char *argv[]) {
 			state->keySize = scrambleSize;
 			known->keySize = state->keySize;
 		}
-		fread(&state->scramble, 1, scrambleSize, inScramble);
 		memset(&known->scramble, 0xFF, scrambleSize);
 		fclose(inScramble);
 		inScramble = NULL;
@@ -439,7 +442,7 @@ int main(int argc, char *argv[]) {
 			goto done;
 		}
 		uint8_t *ptData = malloc(size);
-		fread(ptData, 1, size, plainText);
+		fread_safe(ptData, 1, size, plainText);
 		fclose(plainText); plainText = NULL;
 
 //		memset(known->key, 0, MAX_KEY_REPEAT);
