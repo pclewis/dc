@@ -11,8 +11,8 @@ int main(int argc, char *argv[]) {
 		goto done;
 	}
 
-	f1 = confirmOpen(argv[1], "rb");
-	f2 = confirmOpen(argv[2], "rb");
+	f1 = fopen_safe(argv[1], "rb");
+	f2 = fopen_safe(argv[2], "rb");
 
 	if(!f1 || !f2) goto done;
 

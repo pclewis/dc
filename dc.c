@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <assert.h>
@@ -261,6 +260,11 @@ void *encryptData( uint8_t *data, size_t size, DCState *state ) {
 	return result;
 }
 
+void writeFile( const char *desc, FILE *fp, void *data, size_t size ) {
+	size_t bytes = fwrite_safe(fp, data, size);
+	printf("Wrote %s: %zu bytes\n", desc, bytes);
+}
+
 
 void usage(char *pname) {
 	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-o instate] [-O outstate] [-p plaintext] [-e] <infile> [outfile]\n", pname);
@@ -290,13 +294,13 @@ int main(int argc, char *argv[]) {
 	int c;
 	while((c = getopt(argc, argv, "hk:K:s:S:c:o:O:p:e")) != -1) {
 		switch(c) {
-			case 'k': inKey       = confirmOpen(optarg, "rb"); break;
-			case 'K': outKey      = confirmOpen(optarg, "wb"); break;
-			case 's': inScramble  = confirmOpen(optarg, "rb"); break;
-			case 'S': outScramble = confirmOpen(optarg, "wb"); break;
-			case 'o': inState     = confirmOpen(optarg, "rb"); break;
-			case 'O': outState    = confirmOpen(optarg, "wb"); break;
-			case 'p': plainText   = confirmOpen(optarg, "rb"); break;
+			case 'k': inKey       = fopen_safe(optarg, "rb"); break;
+			case 'K': outKey      = fopen_safe(optarg, "wb"); break;
+			case 's': inScramble  = fopen_safe(optarg, "rb"); break;
+			case 'S': outScramble = fopen_safe(optarg, "wb"); break;
+			case 'o': inState     = fopen_safe(optarg, "rb"); break;
+			case 'O': outState    = fopen_safe(optarg, "wb"); break;
+			case 'p': plainText   = fopen_safe(optarg, "rb"); break;
 			case 'e': encrypt = true; break;
 			case 'c': 
 				counter = atoi(optarg);
@@ -308,8 +312,8 @@ int main(int argc, char *argv[]) {
 				goto done;
 		}
 	}
-	if(optind < argc) inFile  = confirmOpen(argv[optind++], "rb");
-	if(optind < argc) outFile = confirmOpen(argv[optind++], "wb");
+	if(optind < argc) inFile  = fopen_safe(argv[optind++], "rb");
+	if(optind < argc) outFile = fopen_safe(argv[optind++], "wb");
 	if(optind < argc || inFile == NULL) {
 		usage(argv[0]);
 		goto done;
@@ -490,7 +494,7 @@ int main(int argc, char *argv[]) {
 
 	if(outKey      != NULL) writeFile( "key",      outKey,      &state->key,      state->keySize  );
 	if(outScramble != NULL) writeFile( "scramble", outScramble, &state->scramble, state->keySize  );
-	if(outState    != NULL) writeFile( "state",    outState,    state,           sizeof(DCState) );
+	if(outState    != NULL) writeFile( "state",    outState,    state,            sizeof(DCState) );
 
 
 	if(outFile!=NULL) {

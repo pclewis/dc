@@ -39,8 +39,8 @@ char *scrambleFileName(const char *fn) {
 }
 
 void relate(Relation *relation, const char *fn) {
-	FILE *keyfp = confirmOpen(fn, "rb");
-	FILE *scrfp = confirmOpen(scrambleFileName(fn), "rb");
+	FILE *keyfp = fopen_safe(fn, "rb");
+	FILE *scrfp = fopen_safe(scrambleFileName(fn), "rb");
 	if(!keyfp) return;
 	if(!scrfp) { fclose(keyfp); return; }
 	uint8_t key[MAX_KEY_SIZE], scr[MAX_KEY_SIZE];
