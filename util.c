@@ -4,6 +4,7 @@
 #include <string.h>
 #include <errno.h>
 #include <assert.h>
+#include "util.h"
 
 void die(const char *fmt, ...) {
 	va_list args;
@@ -19,6 +20,13 @@ size_t fread_safe(void *ptr, size_t size, size_t nmemb, FILE *stream) {
 	size_t read = fread(ptr, size, nmemb, stream);
 	if(read != (size*nmemb)) die("Bad read: got %zu/%zu bytes.", read, (size*nmemb));
 	return read;
+}
+
+void *fread_new(size_t *size, FILE *stream) {
+	*size = fileSize(stream);
+	void *ptr = malloc(*size);
+	fread_safe(ptr, 1, *size, stream);
+	return ptr;
 }
 
 FILE *fopen_safe(const char *fn, const char *mode) {

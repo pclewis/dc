@@ -13,7 +13,8 @@ static inline uint8_t reverseBits(uint8_t b) {// hax
 
 void die(const char *fmt, ...) __attribute__((noreturn, nonnull (1), format (printf, 1, 2)));
 size_t fread_safe(void *ptr, size_t size, size_t nmemb, FILE *stream) __attribute__((nonnull));
+void *fread_new(size_t *size, FILE *stream) __attribute__((nonnull));
 FILE *fopen_safe(const char *fn, const char *mode) __attribute__((nonnull));
 size_t fwrite_safe(FILE *fp, void *data, size_t size) __attribute__((nonnull));
-long fileSize(FILE *fp) __attribute__((nonnull));
+size_t fileSize(FILE *fp) __attribute__((nonnull));
 void *realloc_safe(void *ptr, size_t size);

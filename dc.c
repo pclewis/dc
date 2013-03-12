@@ -62,7 +62,7 @@ static int compareFrameHeaderPointer(const void *v1, const void *v2) {
  * @param  data        Buffer to search
  * @param  size        Size of buffer
  * @param  loopOffset  How far apart perfectly matching bytes will appear.
- * @return             New array of pointers into data. NULL-terminated. Order is undefined. Caller must free.
+ * @return             New array of pointers into data in ascending order. NULL-terminated. Caller must free.
  */
 static uint8_t **findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset) {
 	uint8_t **result = calloc(1024, sizeof(*result));
@@ -377,6 +377,7 @@ int main(int argc, char *argv[]) {
 	bool counterSet   = false;
 	uint8_t *data     = NULL;
 	bool encrypt      = false;
+	size_t size       = 0;
 
 	DCState *state = calloc(1, sizeof(DCState));
 	DCState *known = calloc(1, sizeof(DCState));
@@ -409,13 +410,7 @@ int main(int argc, char *argv[]) {
 		goto done;
 	}
 
-	fseek(inFile, 0, SEEK_END);
-	size_t size = ftell(inFile);
-	fseek(inFile, 0, SEEK_SET);
-
-	data = malloc( size );
-
-	fread_safe(data, 1, size, inFile);
+	data = fread_new(&size, inFile);
 	fclose(inFile);
 	inFile = NULL;
 
