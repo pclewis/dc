@@ -42,9 +42,33 @@ typedef struct {
 	size_t size;
 	uint8_t **frameHeaders;
 
-	DCState *state;
-	DCState *known;
+	DCState state;
+	DCState known;
 } DCInfo;
+
+static DCInfo *dcinfo_new() {
+	DCInfo *info = calloc_safe(1, sizeof(DCInfo));
+	info->bitRate = 128000;
+	info->frequency = 44100;
+	return info;
+}
+
+static void dcinfo_calculateFrameInfo(DCInfo *info) {
+	uint8_t bbits = 0, fbits = 0;
+	switch(info->bitRate) {
+		case 96000:  bbits = 7; info->loopOffset = 0x3C00; break;
+		case 128000: bbits = 9; info->loopOffset = 0xF000; break;
+		default: die("Unsupported bitrate: %u\n", info->bitRate);
+	}
+	switch(info->frequency) {
+		case 44100: fbits = 0; break;
+		case 48000: fbits = 1; break;
+		case 32000: fbits = 2; break;
+		default: die("Invalid frequency: %u\n", info->frequency);
+	}
+	info->frameSize = 144 * info->bitRate / info->frequency;
+	info->frameHeader = 0xFFFB0000 | (bbits << 12) | (fbits << 10);	
+}
 
 // Treat anything within 4 bytes as equal
 // Since we don't know many bits of the last byte of the frame header, the next few bytes may also wind up matching.
@@ -350,7 +374,12 @@ void writeFile( const char *desc, FILE *fp, void *data, size_t size ) {
 
 
 void usage(char *pname) {
-	printf("Usage: %s [-k inkey] [-K outkey] [-s inscramble] [-S outscramble] [-c counter] [-o instate] [-O outstate] [-p plaintext] [-e] <infile> [outfile]\n", pname);
+	printf("Usage: %s [-k inkey] [-K outkey]\n"
+	       "          [-s inscramble] [-S outscramble]\n"
+	       "          [-o instate] [-O outstate]\n"
+	       "          [-r bitrate] [-f frequency]\n"
+	       "          [-p plaintext]\n"
+	       "          [-e] <infile> [outfile]\n", pname);
 	printf("\n");
 }
 
@@ -372,11 +401,13 @@ int main(int argc, char *argv[]) {
 	bool encrypt      = false;
 	size_t size       = 0;
 
+	DCInfo *info = dcinfo_new();
+
 	DCState *state = calloc(1, sizeof(DCState));
 	DCState *known = calloc(1, sizeof(DCState));
 
 	int c;
-	while((c = getopt(argc, argv, "hk:K:s:S:c:o:O:p:e")) != -1) {
+	while((c = getopt(argc, argv, "hk:K:s:S:c:o:O:p:r:f:e")) != -1) {
 		switch(c) {
 			case 'k': inKey       = fopen_safe(optarg, "rb"); break;
 			case 'K': outKey      = fopen_safe(optarg, "wb"); break;
@@ -385,6 +416,8 @@ int main(int argc, char *argv[]) {
 			case 'o': inState     = fopen_safe(optarg, "rb"); break;
 			case 'O': outState    = fopen_safe(optarg, "wb"); break;
 			case 'p': plainText   = fopen_safe(optarg, "rb"); break;
+			case 'r': info->bitRate   = atoi(optarg); break;
+			case 'f': info->frequency = atoi(optarg); break;
 			case 'e': encrypt = true; break;
 			case 'c': 
 				counter = atoi(optarg);
@@ -407,11 +440,16 @@ int main(int argc, char *argv[]) {
 	fclose(inFile);
 	inFile = NULL;
 
-	uint8_t **frameHeaders = findFrameHeaders(data, size, 0xF000);
+	info->frameHeaders = findFrameHeaders(data, size, 0xF000);
 
-	for(uint8_t **fh = frameHeaders; *fh != NULL; ++fh) {
+	for(uint8_t **fh = info->frameHeaders; *fh != NULL; ++fh) {
 		printf("Frame header: %zu\n", *fh - data);
 	}
+
+	dcinfo_calculateFrameInfo(info);
+	printf("Frame size: %zu\n", info->frameSize);
+	printf("Frame header: %08x\n", info->frameHeader);
+	printf("Loop offset: %04zx\n", info->loopOffset);
 
 	goto done;
 

@@ -18,3 +18,4 @@ FILE *fopen_safe(const char *fn, const char *mode) __attribute__((nonnull));
 size_t fwrite_safe(FILE *fp, void *data, size_t size) __attribute__((nonnull));
 size_t fileSize(FILE *fp) __attribute__((nonnull));
 void *realloc_safe(void *ptr, size_t size);
+void *calloc_safe(size_t nmemb, size_t size);

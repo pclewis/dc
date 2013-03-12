@@ -54,4 +54,10 @@ void *realloc_safe(void *ptr, size_t size) {
 	void *result = realloc(ptr, size);
 	if(result == NULL) die("Realloc failed. Requested size: %zu", size); // note ptr is unfreed
 	return result;
-} 
+}
+
+void *calloc_safe(size_t nmemb, size_t size) {
+	void *result = calloc(nmemb, size);
+	if(result == NULL) die("Calloc failed. Requested size: %zu", nmemb*size);
+	return result;
+}
