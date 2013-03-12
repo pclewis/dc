@@ -73,43 +73,36 @@ static uint8_t **findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset)
 	for(size_t i = 0; i <= (loopOffset - 4); ++i) {
 		for(size_t j = i; j <= (size - (loopOffset * requiredMatches) - 4); j += loopOffset) {
 			uint32_t value = ((data[j] << 24) | (data[j+1] << 16) | (data[j+2] << 8) | data[j]) & FH_MASK;
-			bool doAdd = false;
+			unsigned int start_n_results = n_results;
 
-			while(true) { // First iteration: count matches, second iteration: add to list.
-				unsigned int n_matches = 0, start_n_results = n_results;
-				for(size_t k = j; k <= (size - 4); k += loopOffset) {
-					// Don't match anything we've already added or that contains part of what we've already added.
-					void *ptr = &data[k];
-					if(bsearch(&ptr, result, start_n_results, sizeof(*result), compareFrameHeaderPointer) != NULL)
-						continue;
+			for(size_t k = j; k <= (size - 4); k += loopOffset) {
+				void *ptr = &data[k];
 
-					uint32_t compare = ((data[k] << 24) | (data[k+1] << 16) | (data[k+2] << 8) | data[k]) & FH_MASK;
-					if(value == compare) {
-						if(doAdd) {
-							if(n_results >= n_allocated) {
-								n_allocated *= 2;
-								result = realloc_safe(result, sizeof(*result) * n_allocated);
-							}
-							result[n_results] = &data[k];
-							n_results += 1;
-						} else {
-							n_matches += 1;
-							if(n_matches >= requiredMatches) break;
-						}
-					}
-				}
-
-				if(!doAdd && n_matches >= requiredMatches) {
-					doAdd = true;
+				// Don't match anything we've already added or that contains part of what we've already added.
+				// Only searching results that we didn't just add.
+				if(bsearch(&ptr, result, start_n_results, sizeof(*result), compareFrameHeaderPointer) != NULL)
 					continue;
+
+				uint32_t compare = ((data[k] << 24) | (data[k+1] << 16) | (data[k+2] << 8) | data[k]) & FH_MASK;
+				if(value == compare) {
+					if(n_results >= n_allocated) {
+						n_allocated *= 2;
+						result = realloc_safe(result, sizeof(*result) * n_allocated);
+					}
+					result[n_results] = ptr;
+					n_results += 1;
 				}
-				break;
 			}
 
-			if(doAdd) {
+			if((n_results - start_n_results) >= requiredMatches) {
+				// only need to sort once we're done adding
 				qsort(result, n_results, sizeof(*result), compareFrameHeaderPointer);
+			} else {
+				// didn't get enough, discard everything we added
+				n_results = start_n_results;
 			}
 		}
+
 	}
 
 	result = realloc_safe(result, sizeof(*result) * n_results + 1);
