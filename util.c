@@ -35,6 +35,20 @@ FILE *fopen_safe(const char *fn, const char *mode) {
 	return fp;
 }
 
+size_t fopen_and_read(void *ptr, size_t size, const char *fn, const char *mode) {
+	FILE *fp = fopen_safe(fn, mode);
+	size_t read = fread(ptr, 1, size, fp);
+	fclose(fp);
+	return read;
+}
+
+size_t fopen_and_write(void *ptr, size_t size, const char *fn, const char *mode) {
+	FILE *fp = fopen_safe(fn, mode);
+	size_t written = fwrite_safe(fp, ptr, size);
+	fclose(fp);
+	return written;
+}
+
 size_t fwrite_safe(FILE *fp, void *data, size_t size) {
 	size_t written = fwrite(data, 1, size, fp);
 	if(written != size) die("Bad write: wrote %zu/%zu bytes.", written, size);
