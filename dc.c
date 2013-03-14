@@ -103,7 +103,7 @@ static int compareFrameHeaderPointer(const void *v1, const void *v2) {
 static size_t *findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset, size_t *out_n_headers) {
 	size_t *result = calloc(1024, sizeof(*result));
 	size_t n_results = 0, n_allocated = 1024;
-	unsigned int requiredMatches = (size / loopOffset) * 1/4;
+	unsigned int requiredMatches = (size / loopOffset) * 2/4;
 	if(requiredMatches < 3) requiredMatches = 3;
 
 	if( (loopOffset * requiredMatches) > (size - 4) ) die("Not enough data to find frame headers. Size=%zu loopOffset=%zu. Max possible matches: %zu", size, loopOffset, size / loopOffset );
@@ -232,7 +232,7 @@ static bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const b
 		memset( &info->state, 0, sizeof(info->state) );
 		memset( &info->known, 0, sizeof(info->known) );
 
-		printf("Trying keySize %zu counter %u\n", info->keySize, info->counter);
+		//printf("Trying keySize %zu counter %u\n", info->keySize, info->counter);
 
 		bool success = true;
 
