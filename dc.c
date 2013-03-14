@@ -40,7 +40,8 @@ typedef struct {
 
 	uint8_t *data;
 	size_t size;
-	uint8_t **frameHeaders;
+	size_t *frameHeaders;
+	size_t n_frameHeaders;
 
 	DCState state;
 	DCState known;
@@ -70,11 +71,17 @@ static void dcinfo_calculateFrameInfo(DCInfo *info) {
 	info->frameHeader = 0xFFFB0000 | (bbits << 12) | (fbits << 10);	
 }
 
+static void dcinfo_free(DCInfo *info) {
+	if(info->data) free(info->data);
+	if(info->frameHeaders) free(info->frameHeaders);
+	free(info);
+}
+
 // Treat anything within 4 bytes as equal
 // Since we don't know many bits of the last byte of the frame header, the next few bytes may also wind up matching.
 // Ex: for FFFB926000, we might match both (FFFB9260)00 and FF(FB926000)
 static int compareFrameHeaderPointer(const void *v1, const void *v2) {
-	uint8_t *p1 = *(uint8_t**)v1, *p2 = *(uint8_t**)v2;
+	size_t p1 = *(size_t*)v1, p2 = *(size_t*)v2;
 	ptrdiff_t diff = p1 - p2;
 	if(diff > -4 && diff < 4) return 0;
 	return (p1 < p2) ? -1 : 1;
@@ -83,15 +90,19 @@ static int compareFrameHeaderPointer(const void *v1, const void *v2) {
 /**
  * Search for frame headers in an encrypted buffer.
  * 
- * @param  data        Buffer to search
- * @param  size        Size of buffer
- * @param  loopOffset  How far apart perfectly matching bytes will appear.
- * @return             New array of pointers into data in ascending order. NULL-terminated. Caller must free.
+ * @param  data          Buffer to search
+ * @param  size          Size of buffer
+ * @param  loopOffset    How far apart perfectly matching bytes will appear.
+ * @param  out_n_headers Variable to store total number of found headers in.
+ * @return               New array of pointers into data in ascending order. Caller must free.
  */
-static uint8_t **findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset) {
-	uint8_t **result = calloc(1024, sizeof(*result));
+static size_t *findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset, size_t *out_n_headers) {
+	size_t *result = calloc(1024, sizeof(*result));
 	size_t n_results = 0, n_allocated = 1024;
-	unsigned int requiredMatches = (size / loopOffset) * 3/4;
+	unsigned int requiredMatches = (size / loopOffset) * 1/4;
+	if(requiredMatches < 3) requiredMatches = 3;
+
+	if( (loopOffset * requiredMatches) > (size - 4) ) die("Not enough data to find frame headers. Size=%zu loopOffset=%zu. Max possible matches: %zu", size, loopOffset, size / loopOffset );
 
 	// naive, but simple: for every index in every segment of loopOffset bytes, see if we can find the required number of matches in future segments.
 	for(size_t i = 0; i <= (loopOffset - 4); ++i) {
@@ -100,11 +111,9 @@ static uint8_t **findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset)
 			unsigned int start_n_results = n_results;
 
 			for(size_t k = j; k <= (size - 4); k += loopOffset) {
-				void *ptr = &data[k];
-
 				// Don't match anything we've already added or that contains part of what we've already added.
 				// Only searching results that we didn't just add.
-				if(bsearch(&ptr, result, start_n_results, sizeof(*result), compareFrameHeaderPointer) != NULL)
+				if(bsearch(&k, result, start_n_results, sizeof(*result), compareFrameHeaderPointer) != NULL)
 					continue;
 
 				uint32_t compare = ((data[k] << 24) | (data[k+1] << 16) | (data[k+2] << 8) | data[k]) & FH_MASK;
@@ -113,7 +122,7 @@ static uint8_t **findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset)
 						n_allocated *= 2;
 						result = realloc_safe(result, sizeof(*result) * n_allocated);
 					}
-					result[n_results] = ptr;
+					result[n_results] = k;
 					n_results += 1;
 				}
 			}
@@ -129,8 +138,8 @@ static uint8_t **findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset)
 
 	}
 
-	result = realloc_safe(result, sizeof(*result) * n_results + 1);
-	result[n_results] = NULL;
+	result = realloc_safe(result, sizeof(*result) * n_results);
+	*out_n_headers = n_results;
 	return result;
 }
 
@@ -229,7 +238,7 @@ uint8_t determineCounter(uint8_t *data, size_t size) {
 	return result;
 }
 
-bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask, DCState *state, DCState *known ) {
+bool deriveKey( const uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask, DCState *state, DCState *known ) {
 	uint16_t cipherBytes     = (data[offset] << 8) | data[offset+1];
 	uint8_t  counter         = state->counter + (offset / 2);
 	size_t   keyOffset       = (offset / 2) % state->keySize;
@@ -238,7 +247,7 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 	uint8_t *key             = state->key      + keyOffset;
 	uint8_t *scramblePattern = state->scramble + keyOffset;
 
-#define COLLISION(type, n) { /*printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); */return false; }
+#define COLLISION(type, n) { /* printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); */ return false; }
 	assert( (offset % 2) == 0 );
 
 	for(size_t bitNum = 0; bitNum < 8; ++bitNum) {
@@ -251,7 +260,8 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 		bool xbit0        = BIT_IS_SET(cipherBytes, bitNum * 2 + 0) ^ ptCounterBit;
 		bool xbit1        = BIT_IS_SET(cipherBytes, bitNum * 2 + 1) ^ ptCounterBit;
 
-		if(counterBit != xbit0 && counterBit != xbit1) return false;
+		if(counterBit != xbit0 && counterBit != xbit1) COLLISION("counter bit don't fit", "q");
+
 		if(xbit0 == xbit1) {
 			// Don't know if it's scrambled, but the key is the same either way
 			assert( BIT_IS_SET(cipherBytes, bitNum*2) == BIT_IS_SET(cipherBytes, bitNum*2+1));
@@ -277,6 +287,61 @@ bool deriveKey( uint8_t *data, size_t offset, uint16_t plainBytes, uint16_t mask
 		}
 	}
 	return true;
+}
+
+bool deriveKey32( const uint8_t *data, const size_t offset, const uint32_t plainBytes, const uint32_t mask, DCState *state, DCState *known ) {
+	if((offset%2) == 0) {
+		if (!deriveKey( data, offset+0, plainBytes >> 16,          mask >> 16,            state, known)) return false;
+		if (!deriveKey( data, offset+2, plainBytes & 0xFFFF,       mask & 0xFFFF,         state, known)) return false;
+	} else {
+		if (!deriveKey( data, offset-1, plainBytes >> 24,          mask >> 24,            state, known)) return false;
+		if (!deriveKey( data, offset+1, plainBytes >> 8,           mask >> 8,             state, known)) return false;
+		if (!deriveKey( data, offset+3, (plainBytes & 0xFF) << 8, (mask & 0xFF) << 8,     state, known)) return false;
+	}
+	return true;
+}
+
+size_t nextKeySize(size_t keySize) {
+	for(size_t i = 0; KEY_REPEATS[i] != 0; ++i)
+		if(KEY_REPEATS[i] == keySize) return KEY_REPEATS[i+1];
+	return 0;
+}
+
+bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const bool keySizeKnown ) {
+	if(!counterKnown) info->counter = 0;
+	if(!keySizeKnown) info->keySize = KEY_REPEATS[0];
+
+	while(true) {
+		memset( &info->state, 0, sizeof(info->state) );
+		memset( &info->known, 0, sizeof(info->known) );
+
+		info->state.keySize = info->keySize;
+		info->state.counter = info->counter;
+
+		printf("Trying keySize %zu counter %u\n", info->keySize, info->counter);
+
+		bool success = true;
+
+		for(size_t i = 0; i < info->n_frameHeaders; ++i) {
+			size_t offset = info->frameHeaders[i];
+			if( !deriveKey32( info->data, offset, info->frameHeader, FH_MASK, &info->state, &info->known ) ) {
+				success = false;
+				break;
+			}
+		}
+
+		if(success) return true;
+
+		if(counterKnown || info->counter == 255) {
+			if(keySizeKnown) return false;
+			if(!counterKnown) info->counter = 0;
+			info->keySize = nextKeySize(info->keySize);
+			if(info->keySize == 0) return false;
+		} else {
+			info->counter += 1;
+		}
+	}
+	assert(0); /* unreachable */
 }
 
 bool determineKey( uint8_t *data, size_t size, DCState *state, DCState *known ) {
@@ -420,7 +485,7 @@ int main(int argc, char *argv[]) {
 			case 'f': info->frequency = atoi(optarg); break;
 			case 'e': encrypt = true; break;
 			case 'c': 
-				counter = atoi(optarg);
+				info->counter = atoi(optarg);
 				counterSet = true;
 				break;
 			case 'h':
@@ -436,14 +501,13 @@ int main(int argc, char *argv[]) {
 		goto done;
 	}
 
-	data = fread_new(&size, inFile);
+	info->data = fread_new(&size, inFile);
 	fclose(inFile);
 	inFile = NULL;
 
-	info->frameHeaders = findFrameHeaders(data, size, 0xF000);
-
-	for(uint8_t **fh = info->frameHeaders; *fh != NULL; ++fh) {
-		printf("Frame header: %zu\n", *fh - data);
+	if(!encrypt) {
+		printf("Swapping bytes\n");
+		swapBytes(info->data, size);
 	}
 
 	dcinfo_calculateFrameInfo(info);
@@ -451,12 +515,19 @@ int main(int argc, char *argv[]) {
 	printf("Frame header: %08x\n", info->frameHeader);
 	printf("Loop offset: %04zx\n", info->loopOffset);
 
+	info->frameHeaders = findFrameHeaders(info->data, size, info->loopOffset, &info->n_frameHeaders);
+
+	for(size_t i = 0; i < info->n_frameHeaders; ++i) {
+		printf("Frame header: %zu\n", info->frameHeaders[i]);
+	}
+
+	printf("Total %zu, estimated amount: %zu\n", info->n_frameHeaders, size/(info->frameSize+1));
+
+	bool r = prepareCounterAndKey( info, counterSet, info->keySize != 0 );
+	printf("r %s counter: %u keySize: %zu\n", r ? "true" : "false", info->counter, info->keySize );
+
 	goto done;
 
-	if(!encrypt) {
-		printf("Swapping bytes\n");
-		swapBytes(data, size);
-	}
 
 	if (encrypt && !inState && (!inKey || !inScramble || !counterSet)) {
 		printf("can't encrypt without state\n");
@@ -630,6 +701,7 @@ int main(int argc, char *argv[]) {
 	status = EXIT_SUCCESS;
 
 done:
+	if(info) dcinfo_free(info);
 	if(data) free(data);
 	if(state) free(state);
 	if(known) free(known);
