@@ -103,7 +103,7 @@ static int compareFrameHeaderPointer(const void *v1, const void *v2) {
 static size_t *findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset, size_t *out_n_headers) {
 	size_t *result = calloc(1024, sizeof(*result));
 	size_t n_results = 0, n_allocated = 1024;
-	unsigned int requiredMatches = (size / loopOffset) * 2/4;
+	unsigned int requiredMatches = (size / loopOffset) * 3/4;
 	if(requiredMatches < 3) requiredMatches = 3;
 
 	if( (loopOffset * requiredMatches) > (size - 4) ) die("Not enough data to find frame headers. Size=%zu loopOffset=%zu. Max possible matches: %zu", size, loopOffset, size / loopOffset );
@@ -438,11 +438,17 @@ int main(int argc, char *argv[]) {
 
 	info->frameHeaders = findFrameHeaders(info->data, info->size, info->loopOffset, &info->n_frameHeaders);
 
+	if(info->n_frameHeaders == 0) die("Could not detect any frame headers.");
+	size_t maxFrameHeaders = info->size / info->frameSize;
+	if(info->n_frameHeaders > maxFrameHeaders) die("Found %zu frame headers but file only has room for %zu.", info->n_frameHeaders, maxFrameHeaders);
+
+/*
 	for(size_t i = 0; i < info->n_frameHeaders; ++i) {
 		printf("Frame header: %zu\n", info->frameHeaders[i]);
 	}
+*/
 
-	printf("Total %zu, max possible: %zu\n", info->n_frameHeaders, info->size/info->frameSize);
+	printf("Total %zu, max possible: %zu\n", info->n_frameHeaders, maxFrameHeaders);
 
 	bool r = prepareCounterAndKey( info, counterSet, info->keySize != 0 );
 	printf("r %s counter: %u keySize: %zu\n", r ? "true" : "false", info->counter, info->keySize );
@@ -537,6 +543,13 @@ int main(int argc, char *argv[]) {
 
 	printKnownBits( info->state.scramble, info->known.scramble );
 	printKnownBits( info->state.key,      info->known.key );
+
+	if(knownBits(info->known.scramble) < info->keySize*8 ||
+		knownBits(info->known.key) < info->keySize*8) {
+		printf("Incomplete key, not creating output.\n");
+		goto done;
+	}
+
 
 	if(outKey      != NULL) writeFile( "key",      outKey,      info->state.key,      info->keySize  );
 	if(outScramble != NULL) writeFile( "scramble", outScramble, info->state.scramble, info->keySize  );
