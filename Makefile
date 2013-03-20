@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-std=c99 -Wall -Wextra -Werror -pedantic -Ofast
+CFLAGS=-std=c99 -Wall -Wextra -Werror -pedantic -O3
 DEBUG_CFLAGS=-ggdb
 LDFLAGS=
 
