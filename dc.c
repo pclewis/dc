@@ -8,7 +8,7 @@
 #include <getopt.h>
 #include "util.h"
 
-#define BLOCK_SIZE  0xF00 // lcm(MAX_KEY_REPEAT, MAX_COUNTER)
+#define BLOCK_SIZE  0xF00 // lcm(MAX_KEY_REPEAT, 2**COUNTER_BITS=256)
 
 #define FH_B3_MASK  0xFC // frames may or may not have the padding bit (bit 2) set, and it may or may not be scrambled, so ignore last two bits
 #define FH_B4_MASK  0x03 // some frame use joint stereo (bits 4,5,6,7), or orig/copyright (2,3) so ignore first 6 bits
@@ -57,6 +57,7 @@ static void dcinfo_calculateFrameInfo(DCInfo *info) {
 	uint8_t bbits = 0, fbits = 0;
 	switch(info->bitRate) {
 		case 96000:  bbits = 7; break;
+		case 112000: bbits = 8; break;
 		case 128000: bbits = 9; break;
 		default: die("Unsupported bitrate: %u\n", info->bitRate);
 	}
@@ -92,15 +93,18 @@ static inline size_t nextOffset(size_t i, size_t *result, size_t n_results, size
 	if(match) {
 		*curOffset = 0;
 		*maxOffset = 1;
-		return *match + frameSize;
+		do {
+			i = *match + frameSize;
+		} while ( (match = bsearch(&i, result, n_results, sizeof(*result), compareFrameHeaderPointer)) != NULL );
+		return i;
 	}
 
 	if( *curOffset >= *maxOffset ) {
 		size_t o = *curOffset;
 		*curOffset = 0;
-		if(*maxOffset < frameSize)
+		if(*maxOffset < 16)
 			*maxOffset += 1; // since we dont know if this frame was padded, next frame could be 1 byte further
-		if(*maxOffset > 16) {
+		if(*maxOffset >= 16) {
 			printf("MaxOffset critical: %zu offset=%zu\n", *maxOffset, i);
 		}
 		printf("Couldn't find frame expected at offset %zu\n", i - o);
@@ -172,7 +176,9 @@ static size_t *findFrameHeaders(uint8_t *data, size_t size, size_t frameSize, si
 		}
 	}
 
-	result = realloc_safe(result, sizeof(*result) * n_results);
+	if(n_results > 0 && n_results < n_allocated) {
+		result = realloc_safe(result, sizeof(*result) * n_results);
+	}
 	*out_n_headers = n_results;
 	return result;
 }
@@ -194,7 +200,11 @@ static bool deriveKey( const uint8_t *data, size_t offset, uint16_t plainBytes, 
 	uint8_t *key             = state->key      + keyOffset;
 	uint8_t *scramblePattern = state->scramble + keyOffset;
 
-#define COLLISION(type, n) { /* printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); */ return false; }
+	uint8_t orig_sk = *scrambleKnown, orig_kk = *keyKnown, orig_k = *key, orig_sp = *scramblePattern;
+
+#define COLLISION(type, n) { /* printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); */ \
+	*scrambleKnown = orig_sk; *keyKnown = orig_kk; *key = orig_k; *scramblePattern = orig_sp; \
+	return false; }
 	assert( (offset % 2) == 0 );
 
 	for(size_t bitNum = 0; bitNum < 8; ++bitNum) {
@@ -264,17 +274,25 @@ static bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const b
 
 		//printf("Trying keySize %zu counter %u\n", info->keySize, info->counter);
 
-		bool success = true;
+		int misses = 0;
 
 		for(size_t i = 0; i < info->n_frameHeaders; ++i) {
 			size_t offset = info->frameHeaders[i];
-			if( !deriveKey32( info->data, offset, info->frameHeader, FH_MASK, info->counter, info->keySize, &info->state, &info->known ) ) {
-				success = false;
-				break;
+			size_t leeway = ((i+1) < info->n_frameHeaders) ? (info->frameHeaders[i+1] - offset - info->frameSize) : 16;
+			bool found = false;
+			if(leeway > 8) leeway = 8;
+			for(size_t j = 0; j < leeway; ++j) {
+				if( deriveKey32( info->data, offset+j, info->frameHeader, FH_MASK, info->counter, info->keySize, &info->state, &info->known ) ) {
+					//info->frameHeaders[i] = offset+j;
+					found = true;
+					break;
+				}
 			}
+			if(!found) misses += 1;
 		}
 
-		if(success) return true;
+		if(misses == 0) return true;
+		printf("ks %zu c %u misses=%d\n", info->keySize, info->counter, misses);
 
 		if(counterKnown || info->counter == 255) {
 			if(keySizeKnown) return false;
