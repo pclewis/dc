@@ -1,6 +1,6 @@
 CC=gcc
 CFLAGS=-std=c99 -Wall -Wextra -Werror -pedantic -O3
-DEBUG_CFLAGS=-ggdb
+DEBUG_CFLAGS=-ggdb -O0
 LDFLAGS=
 
 all: dc utils
