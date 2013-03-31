@@ -56,9 +56,20 @@ static DCInfo *dcinfo_new() {
 static void dcinfo_calculateFrameInfo(DCInfo *info) {
 	uint8_t bbits = 0, fbits = 0;
 	switch(info->bitRate) {
-		case 96000:  bbits = 7; break;
-		case 112000: bbits = 8; break;
-		case 128000: bbits = 9; break;
+		case 32000:  bbits =  1; break;
+		case 40000:  bbits =  2; break;
+		case 48000:  bbits =  3; break;
+		case 56000:  bbits =  4; break;
+		case 64000:  bbits =  5; break;
+		case 80000:  bbits =  6; break;
+		case 96000:  bbits =  7; break;
+		case 112000: bbits =  8; break;
+		case 128000: bbits =  9; break;
+		case 160000: bbits = 10; break;
+		case 192000: bbits = 11; break;
+		case 224000: bbits = 12; break;
+		case 256000: bbits = 13; break;
+		case 320000: bbits = 14; break;
 		default: die("Unsupported bitrate: %u\n", info->bitRate);
 	}
 	switch(info->frequency) {
@@ -209,7 +220,7 @@ static bool deriveKey( const uint8_t *data, size_t offset, uint16_t plainBytes, 
 
 	uint8_t orig_sk = *scrambleKnown, orig_kk = *keyKnown, orig_k = *key, orig_sp = *scramblePattern;
 
-#define COLLISION(type, n) { /* printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, state->keySize, keyOffset); */ \
+#define COLLISION(type, n) { /* printf(type " collision " n "  @ bit %zu (counter=%u offs=%zu cb=%04x pb=%04x m=%04x ks=%zu ko=%zu)\n", bitNum, counter, offset, cipherBytes, plainBytes, mask, keySize, keyOffset);*/ \
 	*scrambleKnown = orig_sk; *keyKnown = orig_kk; *key = orig_k; *scramblePattern = orig_sp; \
 	return false; }
 	assert( (offset % 2) == 0 );
@@ -315,6 +326,9 @@ static bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const b
 
 	if(minMisses.count < info->n_frameHeaders/6) { // arbitrary ratio, usually invalid counters have almost all misses, correct counter but wrong key size has as few as 1/2.
 		printf("Guessing counter=%u keySize=%zu, removing %u conflicting frames\n", minMisses.counter, minMisses.keySize, minMisses.count);
+		memset( &info->state, 0, sizeof(info->state) );
+		memset( &info->known, 0, sizeof(info->known) );
+
 		info->counter = minMisses.counter;
 		info->keySize = minMisses.keySize;
 
@@ -342,6 +356,33 @@ static unsigned int knownBits(uint8_t *bits) {
 		}
 	}
 	return count;
+}
+
+/**
+ * Fill in frame headers based on gaps between other headers.
+ *
+ * Ex: If unpadded frame size is 417 and there are frame headers at 20062 and 21734, there are 418*4 bytes in between so no unpadded frames are possible.
+ *     Thus there must also be frame headers at 20480, 20989, and 21316.
+ */
+static void findImpliedFrameHeaders(DCInfo *info) {
+	size_t pfs = info->frameSize + 1;
+	size_t n_added = 0;
+
+	for(size_t i = 0; i < info->n_frameHeaders - 1; ++i) {
+		size_t from = info->frameHeaders[i];
+		size_t to   = info->frameHeaders[i+1];
+		size_t diff = to - from;
+
+		if(diff > pfs && (diff % pfs) == 0) {
+			for(size_t p = from + pfs; p < to; p += pfs) {
+				info->frameHeaders[info->n_frameHeaders + n_added] = p;
+				n_added += 1;
+			}
+		}
+	}
+	printf("Added %zu implied frame headers\n", n_added);
+	info->n_frameHeaders += n_added;
+	qsort(info->frameHeaders, info->n_frameHeaders, sizeof(*info->frameHeaders), compareFrameHeaderPointer);
 }
 
 static void printKnownBits(uint8_t *bits, uint8_t *known) {
@@ -512,16 +553,11 @@ int main(int argc, char *argv[]) {
 	printf("Frame header: %08x\n", info->frameHeader);
 
 	info->frameHeaders = findFrameHeaders(info->data, info->size, info->frameSize, &info->n_frameHeaders);
+	findImpliedFrameHeaders(info);
 
 	if(info->n_frameHeaders == 0) die("Could not detect any frame headers.");
-	size_t maxFrameHeaders = info->size / info->frameSize;
+	size_t maxFrameHeaders = info->size / info->frameSize, minFrameHeaders = info->size / (info->frameSize + 1);
 	if(info->n_frameHeaders > maxFrameHeaders) die("Found %zu frame headers but file only has room for %zu.", info->n_frameHeaders, maxFrameHeaders);
-
-/*
-	for(size_t i = 0; i < info->n_frameHeaders; ++i) {
-		printf("Frame header: %zu\n", info->frameHeaders[i]);
-	}
-*/
 
 	printf("Total %zu, max possible: %zu\n", info->n_frameHeaders, maxFrameHeaders);
 
@@ -529,6 +565,14 @@ int main(int argc, char *argv[]) {
 	printf("r %s counter: %u keySize: %zu\n", r ? "true" : "false", info->counter, info->keySize );
 
 	if(!r) die("Can't get counter");	
+
+	if(info->n_frameHeaders < minFrameHeaders) {
+		printf("Trying to find more implied frame headers...\n");
+		findImpliedFrameHeaders(info);
+		bool r = prepareCounterAndKey( info, true, true );
+		printf("r %s counter: %u keySize: %zu\n", r ? "true" : "false", info->counter, info->keySize );
+		printf("Total %zu, max possible: %zu\n", info->n_frameHeaders, maxFrameHeaders);
+	}
 
 	printf("Known scramble bits: %d/%zu\n", knownBits(info->known.scramble), info->keySize*8 );
 	printf("Known key bits: %d/%zu\n", knownBits(info->known.key), info->keySize*8 );
