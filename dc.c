@@ -8,11 +8,7 @@
 #include <getopt.h>
 #include "util.h"
 
-#define BLOCK_SIZE  0x1E00
-#define BITRATE     128000
-#define FREQUENCY   44100
-#define FRAME_SIZE  (144 * BITRATE / FREQUENCY)
-#define LOOP_OFFSET 0xF000 // I don't actually understand this value
+#define BLOCK_SIZE  0xF00 // lcm(MAX_KEY_REPEAT, MAX_COUNTER)
 
 #define FH_B3_MASK  0xFC // frames may or may not have the padding bit (bit 2) set, and it may or may not be scrambled, so ignore last two bits
 #define FH_B4_MASK  0x03 // some frame use joint stereo (bits 4,5,6,7), or orig/copyright (2,3) so ignore first 6 bits
@@ -39,7 +35,6 @@ typedef struct {
 	unsigned int bitRate;
 	unsigned int frequency;
 	size_t frameSize;
-	size_t loopOffset;
 	uint32_t frameHeader;
 
 	uint8_t *data;
@@ -61,8 +56,8 @@ static DCInfo *dcinfo_new() {
 static void dcinfo_calculateFrameInfo(DCInfo *info) {
 	uint8_t bbits = 0, fbits = 0;
 	switch(info->bitRate) {
-		case 96000:  bbits = 7; info->loopOffset = 0x3C00; break;
-		case 128000: bbits = 9; info->loopOffset = 0xF000; break;
+		case 96000:  bbits = 7; break;
+		case 128000: bbits = 9; break;
 		default: die("Unsupported bitrate: %u\n", info->bitRate);
 	}
 	switch(info->frequency) {
@@ -81,14 +76,39 @@ static void dcinfo_free(DCInfo *info) {
 	free(info);
 }
 
-// Treat anything within 4 bytes as equal
-// Since we don't know many bits of the last byte of the frame header, the next few bytes may also wind up matching.
-// Ex: for FFFB926000, we might match both (FFFB9260)00 and FF(FB926000)
+// Treat any offset that would be inside another another frame as equal 
+static size_t _frame_size;
 static int compareFrameHeaderPointer(const void *v1, const void *v2) {
-	size_t p1 = *(size_t*)v1, p2 = *(size_t*)v2;
-	ptrdiff_t diff = p1 - p2;
-	if(diff > -4 && diff < 4) return 0;
-	return (p1 < p2) ? -1 : 1;
+	size_t s1 = *(size_t*)v1, s2 = *(size_t*)v2;
+	size_t diff = (s1 < s2) ? s2 - s1 : s1 - s2; // diff = abs(s1 - s2)
+	if(diff < _frame_size) return 0;
+	return (s1 < s2) ? -1 : 1;
+}
+
+static inline size_t nextOffset(size_t i, size_t *result, size_t n_results, size_t frameSize, size_t *curOffset, size_t *maxOffset) {
+	// If this offset collides with another frame we already found, jump to the end of that frame.
+	// Note this also handles the case where we just added a result in the previous iteration.
+	size_t *match = bsearch(&i, result, n_results, sizeof(*result), compareFrameHeaderPointer);
+	if(match) {
+		*curOffset = 0;
+		*maxOffset = 1;
+		return *match + frameSize;
+	}
+
+	if( *curOffset >= *maxOffset ) {
+		size_t o = *curOffset;
+		*curOffset = 0;
+		if(*maxOffset < frameSize)
+			*maxOffset += 1; // since we dont know if this frame was padded, next frame could be 1 byte further
+		if(*maxOffset > 16) {
+			printf("MaxOffset critical: %zu offset=%zu\n", *maxOffset, i);
+		}
+		printf("Couldn't find frame expected at offset %zu\n", i - o);
+		return i + frameSize - o;
+	}
+
+	*curOffset += 1;
+	return i + 1;
 }
 
 /**
@@ -96,50 +116,60 @@ static int compareFrameHeaderPointer(const void *v1, const void *v2) {
  * 
  * @param  data          Buffer to search
  * @param  size          Size of buffer
- * @param  loopOffset    How far apart perfectly matching bytes will appear.
  * @param  out_n_headers Variable to store total number of found headers in.
  * @return               New array of pointers into data in ascending order. Caller must free.
  */
-static size_t *findFrameHeaders(uint8_t *data, size_t size, size_t loopOffset, size_t *out_n_headers) {
+static size_t *findFrameHeaders(uint8_t *data, size_t size, size_t frameSize, size_t *out_n_headers) {
 	size_t *result = calloc(1024, sizeof(*result));
 	size_t n_results = 0, n_allocated = 1024;
-	unsigned int requiredMatches = (size / loopOffset) * 3/4;
-	if(requiredMatches < 3) requiredMatches = 3;
+	unsigned int requiredMatches = 3;
+	size_t minMatchSpace = (BLOCK_SIZE * requiredMatches) + 3; // from any given offset, we need enough blocks to find matches in, and 3 more bytes for the rest of the frame header
+	size_t maxOffset = 16; // max bytes we'll search before jumping ahead by a whole frame.
+	size_t curOffset = 0;
 
-	if( (loopOffset * requiredMatches) > (size - 4) ) die("Not enough data to find frame headers. Size=%zu loopOffset=%zu. Max possible matches: %zu", size, loopOffset, size / loopOffset );
+	_frame_size = frameSize;
 
-	// naive, but simple: for every index in every segment of loopOffset bytes, see if we can find the required number of matches in future segments.
-	for(size_t i = 0; i <= (loopOffset - 4); ++i) {
-		for(size_t j = i; j <= (size - (loopOffset * requiredMatches) - 4); j += loopOffset) {
-			uint32_t value = ((data[j] << 24) | (data[j+1] << 16) | (data[j+2] << 8) | data[j]) & FH_MASK;
-			unsigned int start_n_results = n_results;
+	if( minMatchSpace > size ) die("Not enough data to find frame headers. Size=%zu Max possible matches: %zu Min size for match: %zu", size, size / BLOCK_SIZE, minMatchSpace );
 
-			for(size_t k = j; k <= (size - 4); k += loopOffset) {
+	for(size_t i = 0; i < size - minMatchSpace; i=nextOffset(i, result, n_results, frameSize, &curOffset, &maxOffset)) {
+
+		uint32_t value = ((data[i] << 24) | (data[i+1] << 16) | (data[i+2] << 8) | data[i+3]) & FH_MASK;
+		size_t start_n_results = n_results;
+
+		for(size_t k = i; k <= (size - 4); k += BLOCK_SIZE) {
+			uint32_t compare = ((data[k] << 24) | (data[k+1] << 16) | (data[k+2] << 8) | data[k+3]) & FH_MASK;
+			if(value == compare) {
 				// Don't match anything we've already added or that contains part of what we've already added.
 				// Only searching results that we didn't just add.
-				if(bsearch(&k, result, start_n_results, sizeof(*result), compareFrameHeaderPointer) != NULL)
-					continue;
-
-				uint32_t compare = ((data[k] << 24) | (data[k+1] << 16) | (data[k+2] << 8) | data[k]) & FH_MASK;
-				if(value == compare) {
-					if(n_results >= n_allocated) {
-						n_allocated *= 2;
-						result = realloc_safe(result, sizeof(*result) * n_allocated);
-					}
-					result[n_results] = k;
-					n_results += 1;
+				if(bsearch(&k, result, start_n_results, sizeof(*result), compareFrameHeaderPointer) != NULL) {
+					//printf("Short circuit: match inside other frame\n");
+					n_results = start_n_results;
+					break;
+					//continue;
 				}
-			}
 
-			if((n_results - start_n_results) >= requiredMatches) {
-				// only need to sort once we're done adding
-				qsort(result, n_results, sizeof(*result), compareFrameHeaderPointer);
-			} else {
-				// didn't get enough, discard everything we added
-				n_results = start_n_results;
+				if(n_results >= n_allocated) {
+					n_allocated *= 2;
+					result = realloc_safe(result, sizeof(*result) * n_allocated);
+				}
+				result[n_results] = k;
+				n_results += 1;
 			}
 		}
 
+		if((n_results - start_n_results) >= requiredMatches + (maxOffset>4 ? 4 : maxOffset)) {
+			// only need to sort once we're done adding
+			qsort(result, n_results, sizeof(*result), compareFrameHeaderPointer);
+		} else {
+			if((n_results - start_n_results) > 2) {
+				for(size_t fi = start_n_results; fi < n_results; ++fi) {
+					printf("%zx ", result[fi]);
+				}
+				printf("\n");
+			}
+			// didn't get enough, discard everything we added
+			n_results = start_n_results;
+		}
 	}
 
 	result = realloc_safe(result, sizeof(*result) * n_results);
@@ -434,9 +464,8 @@ int main(int argc, char *argv[]) {
 	dcinfo_calculateFrameInfo(info);
 	printf("Frame size: %zu\n", info->frameSize);
 	printf("Frame header: %08x\n", info->frameHeader);
-	printf("Loop offset: %04zx\n", info->loopOffset);
 
-	info->frameHeaders = findFrameHeaders(info->data, info->size, info->loopOffset, &info->n_frameHeaders);
+	info->frameHeaders = findFrameHeaders(info->data, info->size, info->frameSize, &info->n_frameHeaders);
 
 	if(info->n_frameHeaders == 0) die("Could not detect any frame headers.");
 	size_t maxFrameHeaders = info->size / info->frameSize;
@@ -452,6 +481,8 @@ int main(int argc, char *argv[]) {
 
 	bool r = prepareCounterAndKey( info, counterSet, info->keySize != 0 );
 	printf("r %s counter: %u keySize: %zu\n", r ? "true" : "false", info->counter, info->keySize );
+
+	if(!r) die("Can't get counter");	
 
 	printf("Known scramble bits: %d/%zu\n", knownBits(info->known.scramble), info->keySize*8 );
 	printf("Known key bits: %d/%zu\n", knownBits(info->known.key), info->keySize*8 );
@@ -501,11 +532,11 @@ int main(int argc, char *argv[]) {
 					for(size_t fhi = 0; fhi < info->n_frameHeaders; ++fhi) {
 						size_t fi = info->frameHeaders[fhi];
 						int adj = (fi%2==0) ? 0 : 1;
-						for(size_t si = fi + 4+adj; si < fi + FRAME_SIZE - minRunSize; si += 2) {
+						for(size_t si = fi + 4+adj; si < fi + info->frameSize - minRunSize; si += 2) {
 							int count = 0;
 							memcpy( orig_state, &info->state, sizeof(DCState) );
 							memcpy( orig_known, &info->known, sizeof(DCState) );
-							for(size_t i = si; i < fi + FRAME_SIZE - 1 && i < info->size - 1; i += 2) {
+							for(size_t i = si; i < fi + info->frameSize - 1 && i < info->size - 1; i += 2) {
 								if( deriveKey( info->data, i, r, 0xFFFF, info->counter, info->keySize, &info->state, &info->known ) ) {
 									count++;
 								} else {
