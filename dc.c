@@ -86,12 +86,11 @@ static int compareFrameHeaderPointer(const void *v1, const void *v2) {
 	return (s1 < s2) ? -1 : 1;
 }
 
-static inline size_t nextOffset(size_t i, size_t *result, size_t n_results, size_t frameSize, size_t *curOffset, size_t *maxOffset) {
+static inline size_t nextOffset(size_t i, size_t *result, size_t n_results, size_t frameSize, /* IN/OUT */ size_t *maxOffset) {
 	// If this offset collides with another frame we already found, jump to the end of that frame.
 	// Note this also handles the case where we just added a result in the previous iteration.
 	size_t *match = bsearch(&i, result, n_results, sizeof(*result), compareFrameHeaderPointer);
 	if(match) {
-		*curOffset = 0;
 		*maxOffset = 1;
 		do {
 			i = *match + frameSize;
@@ -99,20 +98,38 @@ static inline size_t nextOffset(size_t i, size_t *result, size_t n_results, size
 		return i;
 	}
 
-	if( *curOffset >= *maxOffset ) {
-		size_t o = *curOffset;
-		*curOffset = 0;
-		if(*maxOffset < 16)
-			*maxOffset += 1; // since we dont know if this frame was padded, next frame could be 1 byte further
-		if(*maxOffset >= 16) {
-			printf("MaxOffset critical: %zu offset=%zu\n", *maxOffset, i);
+	if(*maxOffset < frameSize)
+		*maxOffset += 1; // since we dont know if this frame was padded, next frame could be 1 byte further
+	if(*maxOffset >= frameSize) {
+		printf("MaxOffset critical: %zu offset=%zu\n", *maxOffset, i);
+	}
+	printf("Couldn't find frame expected at offset %zu\n", i);
+	return i + frameSize;
+}
+
+static size_t findMatches(uint8_t *data, size_t size, size_t offset, size_t *result, size_t n_results) {
+	uint32_t value = ((data[offset] << 24) | (data[offset+1] << 16) | (data[offset+2] << 8) | data[offset+3]) & FH_MASK;
+	//printf("%08x %02x %02x %02x %02x\n", value, data[offset], data[offset+1], data[offset+2], data[offset+3]);
+	size_t n_found = 0;
+
+	/* start at beginning so we can short circuit on backwards matches inside of other frames */
+	for(size_t i = (offset % BLOCK_SIZE); i <= (size - 4); i += BLOCK_SIZE) {
+		uint32_t compare = ((data[i] << 24) | (data[i+1] << 16) | (data[i+2] << 8) | data[i+3]) & FH_MASK;
+		//if(offset == 417 || offset == 418) printf("%zu %08x %08x\n", offset, value, compare);
+		if(value == compare) {
+			// Don't match anything we've already added or that contains part of what we've already added.
+			// Only searching results that we didn't just add.
+			if(bsearch(&i, result, n_results, sizeof(*result), compareFrameHeaderPointer) != NULL) {
+				//printf("Short circuit: match inside other frame\n");
+				return 0;
+			}
+
+			result[n_results + n_found] = i;
+			n_found += 1;
 		}
-		printf("Couldn't find frame expected at offset %zu\n", i - o);
-		return i + frameSize - o;
 	}
 
-	*curOffset += 1;
-	return i + 1;
+	return n_found;
 }
 
 /**
@@ -120,65 +137,55 @@ static inline size_t nextOffset(size_t i, size_t *result, size_t n_results, size
  * 
  * @param  data          Buffer to search
  * @param  size          Size of buffer
+ * @param  frameSize     Expected size of unpadded frame
  * @param  out_n_headers Variable to store total number of found headers in.
  * @return               New array of pointers into data in ascending order. Caller must free.
  */
 static size_t *findFrameHeaders(uint8_t *data, size_t size, size_t frameSize, size_t *out_n_headers) {
-	size_t *result = calloc(1024, sizeof(*result));
-	size_t n_results = 0, n_allocated = 1024;
+	size_t n_results = 0, n_allocated = size/frameSize;
+	size_t *result = calloc(n_allocated, sizeof(*result));
 	unsigned int requiredMatches = 3;
 	size_t minMatchSpace = (BLOCK_SIZE * requiredMatches) + 3; // from any given offset, we need enough blocks to find matches in, and 3 more bytes for the rest of the frame header
 	size_t maxOffset = 16; // max bytes we'll search before jumping ahead by a whole frame.
-	size_t curOffset = 0;
 
 	_frame_size = frameSize;
 
 	if( minMatchSpace > size ) die("Not enough data to find frame headers. Size=%zu Max possible matches: %zu Min size for match: %zu", size, size / BLOCK_SIZE, minMatchSpace );
 
-	for(size_t i = 0; i < size - minMatchSpace; i=nextOffset(i, result, n_results, frameSize, &curOffset, &maxOffset)) {
+	for(size_t i = 0; i < size - minMatchSpace; i=nextOffset(i, result, n_results, frameSize, &maxOffset)) {
+		size_t mostFound = 0, mostFoundOffset = 0, mfc = 0;
 
-		uint32_t value = ((data[i] << 24) | (data[i+1] << 16) | (data[i+2] << 8) | data[i+3]) & FH_MASK;
-		size_t start_n_results = n_results;
-
-		for(size_t k = i; k <= (size - 4); k += BLOCK_SIZE) {
-			uint32_t compare = ((data[k] << 24) | (data[k+1] << 16) | (data[k+2] << 8) | data[k+3]) & FH_MASK;
-			if(value == compare) {
-				// Don't match anything we've already added or that contains part of what we've already added.
-				// Only searching results that we didn't just add.
-				if(bsearch(&k, result, start_n_results, sizeof(*result), compareFrameHeaderPointer) != NULL) {
-					//printf("Short circuit: match inside other frame\n");
-					n_results = start_n_results;
-					break;
-					//continue;
-				}
-
-				if(n_results >= n_allocated) {
-					n_allocated *= 2;
-					result = realloc_safe(result, sizeof(*result) * n_allocated);
-				}
-				result[n_results] = k;
-				n_results += 1;
+		for(size_t curOffset = 0; curOffset <= maxOffset; ++curOffset) {
+			size_t found = findMatches(data, size, i+curOffset, result, n_results);
+			if(found == mostFound) {
+				++mfc;
+			} else if(found > mostFound) {
+				mfc = 1;
+				mostFound = found;
+				mostFoundOffset = curOffset;
+				//if(found >= requiredMatches) break;
 			}
 		}
 
-		if((n_results - start_n_results) >= requiredMatches + (maxOffset>4 ? 4 : maxOffset)) {
+		//printf("Offset=%zu, mostFound=%zu, mfo=%zu\n", i, mostFound, mostFoundOffset);
+
+		if(mfc > 1) {
+			printf("Don't know which offset to pick at %zu\n", i);
+			continue;
+		}
+
+		if(mostFound >= requiredMatches) {
+			if(mostFoundOffset != maxOffset) { /* rerun if it's not the last one we ran */
+				findMatches(data, size, i+mostFoundOffset, result, n_results);
+			}
+
+			n_results += mostFound;
+
 			// only need to sort once we're done adding
 			qsort(result, n_results, sizeof(*result), compareFrameHeaderPointer);
-		} else {
-			if((n_results - start_n_results) > 2) {
-				for(size_t fi = start_n_results; fi < n_results; ++fi) {
-					printf("%zx ", result[fi]);
-				}
-				printf("\n");
-			}
-			// didn't get enough, discard everything we added
-			n_results = start_n_results;
 		}
 	}
 
-	if(n_results > 0 && n_results < n_allocated) {
-		result = realloc_safe(result, sizeof(*result) * n_results);
-	}
 	*out_n_headers = n_results;
 	return result;
 }
@@ -278,7 +285,7 @@ static bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const b
 
 		for(size_t i = 0; i < info->n_frameHeaders; ++i) {
 			size_t offset = info->frameHeaders[i];
-			size_t leeway = ((i+1) < info->n_frameHeaders) ? (info->frameHeaders[i+1] - offset - info->frameSize) : 16;
+			size_t leeway = 1; // ((i+1) < info->n_frameHeaders) ? (info->frameHeaders[i+1] - offset - info->frameSize) : 16;
 			bool found = false;
 			if(leeway > 8) leeway = 8;
 			for(size_t j = 0; j < leeway; ++j) {
