@@ -275,42 +275,63 @@ static bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const b
 	if(!counterKnown) info->counter = 0;
 	if(!keySizeKnown) info->keySize = KEY_REPEATS[0];
 
+	struct {
+		unsigned int count;
+		uint8_t counter;
+		size_t keySize;
+	} minMisses = {info->n_frameHeaders,0,0};
+
 	while(true) {
 		memset( &info->state, 0, sizeof(info->state) );
 		memset( &info->known, 0, sizeof(info->known) );
 
 		//printf("Trying keySize %zu counter %u\n", info->keySize, info->counter);
 
-		int misses = 0;
+		unsigned int misses = 0;
 
 		for(size_t i = 0; i < info->n_frameHeaders; ++i) {
-			size_t offset = info->frameHeaders[i];
-			size_t leeway = 1; // ((i+1) < info->n_frameHeaders) ? (info->frameHeaders[i+1] - offset - info->frameSize) : 16;
-			bool found = false;
-			if(leeway > 8) leeway = 8;
-			for(size_t j = 0; j < leeway; ++j) {
-				if( deriveKey32( info->data, offset+j, info->frameHeader, FH_MASK, info->counter, info->keySize, &info->state, &info->known ) ) {
-					//info->frameHeaders[i] = offset+j;
-					found = true;
-					break;
-				}
+			if( !deriveKey32( info->data, info->frameHeaders[i], info->frameHeader, FH_MASK, info->counter, info->keySize, &info->state, &info->known ) ) {
+				++misses;
 			}
-			if(!found) misses += 1;
 		}
 
 		if(misses == 0) return true;
-		printf("ks %zu c %u misses=%d\n", info->keySize, info->counter, misses);
+		if(misses < minMisses.count) {
+			minMisses.count   = misses;
+			minMisses.counter = info->counter;
+			minMisses.keySize = info->keySize;
+		}
+		//printf("ks %zu c %u misses=%d\n", info->keySize, info->counter, misses);
 
 		if(counterKnown || info->counter == 255) {
-			if(keySizeKnown) return false;
+			if(keySizeKnown) break;
 			if(!counterKnown) info->counter = 0;
 			info->keySize = nextKeySize(info->keySize);
-			if(info->keySize == 0) return false;
+			if(info->keySize == 0) break;
 		} else {
 			info->counter += 1;
 		}
 	}
-	assert(0); /* unreachable */
+
+	if(minMisses.count < info->n_frameHeaders/6) { // arbitrary ratio, usually invalid counters have almost all misses, correct counter but wrong key size has as few as 1/2.
+		printf("Guessing counter=%u keySize=%zu, removing %u conflicting frames\n", minMisses.counter, minMisses.keySize, minMisses.count);
+		info->counter = minMisses.counter;
+		info->keySize = minMisses.keySize;
+
+		// Set all conflicting frames to SIZE_MAX, so we can just sort them to the end and chop them off.
+		for(size_t i = 0; i < info->n_frameHeaders; ++i) {
+			if( !deriveKey32( info->data, info->frameHeaders[i], info->frameHeader, FH_MASK, info->counter, info->keySize, &info->state, &info->known ) ) {
+				info->frameHeaders[i] = SIZE_MAX;
+			}
+		}
+		qsort(info->frameHeaders, info->n_frameHeaders, sizeof(*info->frameHeaders), compareFrameHeaderPointer);
+		info->n_frameHeaders -= minMisses.count;
+		return true;
+	} else {
+		printf("Too many misses to guess counter: %u\n", minMisses.count);
+	}
+
+	return false;
 }
 
 static unsigned int knownBits(uint8_t *bits) {
