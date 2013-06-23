@@ -286,6 +286,10 @@ static bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const b
 	if(!counterKnown) info->counter = 0;
 	if(!keySizeKnown) info->keySize = KEY_REPEATS[0];
 
+	DCState origState, origKnown;
+	memcpy( &origState, &info->state, sizeof(info->state) );
+	memcpy( &origKnown, &info->known, sizeof(info->known) );
+
 	struct {
 		unsigned int count;
 		uint8_t counter;
@@ -293,9 +297,6 @@ static bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const b
 	} minMisses = {info->n_frameHeaders,0,0};
 
 	while(true) {
-		memset( &info->state, 0, sizeof(info->state) );
-		memset( &info->known, 0, sizeof(info->known) );
-
 		//printf("Trying keySize %zu counter %u\n", info->keySize, info->counter);
 
 		unsigned int misses = 0;
@@ -322,12 +323,13 @@ static bool prepareCounterAndKey( DCInfo *info, const bool counterKnown, const b
 		} else {
 			info->counter += 1;
 		}
+
+		memcpy( &info->state, &origState, sizeof(info->state) );
+		memcpy( &info->known, &origKnown, sizeof(info->known) );
 	}
 
 	if(minMisses.count < info->n_frameHeaders/6) { // arbitrary ratio, usually invalid counters have almost all misses, correct counter but wrong key size has as few as 1/2.
 		printf("Guessing counter=%u keySize=%zu, removing %u conflicting frames\n", minMisses.counter, minMisses.keySize, minMisses.count);
-		memset( &info->state, 0, sizeof(info->state) );
-		memset( &info->known, 0, sizeof(info->known) );
 
 		info->counter = minMisses.counter;
 		info->keySize = minMisses.keySize;
@@ -458,6 +460,8 @@ static void readState( DCInfo *info, const char *fn ) {
 	info->counter = saveState.counter;
 	memcpy( &info->state.key, &saveState.state.key, MAX_KEY_REPEAT );
 	memcpy( &info->state.scramble, &saveState.state.scramble, MAX_KEY_REPEAT );
+	memset( &info->known.key, 0xFF, MAX_KEY_REPEAT );
+	memset( &info->known.scramble, 0xFF, MAX_KEY_REPEAT );
 }
 
 static void writeState( DCInfo *info, const char *fn ) {
@@ -498,12 +502,14 @@ int main(int argc, char *argv[]) {
 		switch(c) {
 			case 'k':
 				info->keySize = fopen_and_read( &info->state.key, MAX_KEY_REPEAT, optarg, "rb" ); 
+				memset( &info->known.key, 0xFF, MAX_KEY_REPEAT );
 				break;
 			case 'K':
 				outKey        = fopen_safe(optarg, "wb");
 				break;
 			case 's':
 				info->keySize = fopen_and_read( &info->state.scramble, MAX_KEY_REPEAT, optarg, "rb" );
+				memset( &info->known.scramble, 0xFF, MAX_KEY_REPEAT );
 				break;
 			case 'S':
 				outScramble = fopen_safe(optarg, "wb");
@@ -603,6 +609,8 @@ retry:
 					printf("Trying original key size (%d) * %d\n", baseKeySize, keyMultiplier);
 					info->keySize = baseKeySize * keyMultiplier;
 					fseek(plainText, 0, SEEK_SET);
+					memset( &info->state, 0, sizeof(info->state) );
+					memset( &info->known, 0, sizeof(info->known) );
 					goto retry;
 				} else {
 					printf("Max key size tried, giving up.\n");
