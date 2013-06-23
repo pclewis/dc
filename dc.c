@@ -559,6 +559,7 @@ int main(int argc, char *argv[]) {
 	size_t maxFrameHeaders = info->size / info->frameSize, minFrameHeaders = info->size / (info->frameSize + 1);
 	if(info->n_frameHeaders > maxFrameHeaders) die("Found %zu frame headers but file only has room for %zu.", info->n_frameHeaders, maxFrameHeaders);
 
+retry:
 	printf("Total %zu, max possible: %zu\n", info->n_frameHeaders, maxFrameHeaders);
 
 	bool r = prepareCounterAndKey( info, counterSet, info->keySize != 0 );
@@ -584,12 +585,28 @@ int main(int argc, char *argv[]) {
 			printf("Ciphertext has length %zu but plaintext has length %zu\n", info->size, ptSize);
 			goto done;
 		}
-		plainText = NULL;
 
 		for(size_t i = 0; i < info->size-1; i += 2) {
 			uint16_t ptw = ptData[i] << 8 | ptData[i+1];
 			if(!deriveKey(info->data, i, ptw, 0xFFFF, info->counter, info->keySize, &info->state, &info->known)) {
 				printf("blew up deriving key from plaintext!\n");
+
+				// HACK HACK HACK HACK HACK
+				static int baseKeySize = 0, keyMultiplier;
+				if(baseKeySize == 0) {
+					baseKeySize = info->keySize;
+					keyMultiplier = 2;
+				} else {
+					keyMultiplier += 1;
+				}
+				if(baseKeySize * keyMultiplier <= MAX_KEY_REPEAT) {
+					printf("Trying original key size (%d) * %d\n", baseKeySize, keyMultiplier);
+					info->keySize = baseKeySize * keyMultiplier;
+					fseek(plainText, 0, SEEK_SET);
+					goto retry;
+				} else {
+					printf("Max key size tried, giving up.\n");
+				}
 				goto done;
 			}
 		}
