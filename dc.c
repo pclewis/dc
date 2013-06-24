@@ -562,7 +562,7 @@ int main(int argc, char *argv[]) {
 	findImpliedFrameHeaders(info);
 
 	if(info->n_frameHeaders == 0) die("Could not detect any frame headers.");
-	size_t maxFrameHeaders = info->size / info->frameSize, minFrameHeaders = info->size / (info->frameSize + 1);
+	size_t maxFrameHeaders = (info->size / info->frameSize) + 1, minFrameHeaders = info->size / (info->frameSize + 1);
 	if(info->n_frameHeaders > maxFrameHeaders) die("Found %zu frame headers but file only has room for %zu.", info->n_frameHeaders, maxFrameHeaders);
 
 retry:
